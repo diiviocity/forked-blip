@@ -22,6 +22,12 @@ permissions:
 
 env:
   V_COMMIT: 0137eb5d8ebc5d183259309ed08ea06ba9bc27d6
+
+  # vc is the C source V bootstraps itself from, and it is a SEPARATE repository
+  # from V. Pinning V without pinning vc is what broke this: the Makefile clones
+  # vc at HEAD, so a snapshot built from a newer V was used to compile the
+  # pinned V's own vlib. This is the snapshot taken just after V_COMMIT.
+  VC_COMMIT: 64b1017fe300
   V_MACOS_V3_NO_FALLBACK: '1'
 
 jobs:
@@ -39,14 +45,23 @@ jobs:
           key: v-${{ env.V_COMMIT }}-${{ runner.os }}-v2
 
       - name: Build V if needed
+        # vc is pinned and the `v` target is built directly: the Makefile clones
+        # vc at HEAD, and a vc snapshot generated from a newer V carries a
+        # parser that rejects the pinned V's own vlib. `all` would pull vc back
+        # to HEAD through download_vc.
         run: |
+          set -e
           if [ ! -x v/v ]; then
             git init -q v
             cd v
             git remote add origin https://github.com/vlang/v.git
             git fetch -q --depth 1 origin "$V_COMMIT"
             git checkout -q FETCH_HEAD
-            make -f Makefile
+            git clone -q https://github.com/vlang/vc vc
+            git -C vc fetch -q --depth 1 origin "$VC_COMMIT"
+            git -C vc checkout -q FETCH_HEAD
+            make -f Makefile v
+            [ -x ./v ] || { echo "::error::no ./v produced"; exit 1; }
           fi
 
       - name: Put V on PATH

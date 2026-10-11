@@ -38,16 +38,28 @@ ENV PATH=/nix/var/nix/profiles/default/bin:/root/.nix-profile/bin:$PATH
 # differently, which is the difference the project was bitten by.
 ARG V_COMMIT=0137eb5d8ebc5d183259309ed08ea06ba9bc27d6
 
+# vc is a SEPARATE repository from V and the Makefile clones it at HEAD,
+# unpinned. That is what broke this: a vc snapshot generated from a newer V
+# carries a parser that rejects the pinned V's own vlib -- vc HEAD gained
+# "reject `if` conditions that start with a parenthesized if expression" on
+# 2026-10-05, and vlib/math/bits/bits.v at this V_COMMIT uses that shape at
+# line 621. This is the vc snapshot taken just after V_COMMIT.
+ARG VC_COMMIT=64b1017fe300
+
 WORKDIR /opt
 # V's own build runs git to stamp the version, and a container's repository has
 # no configured owner, so the directory is marked safe up front.
 RUN git config --global --add safe.directory /opt/v \
+    && git config --global --add safe.directory /opt/v/vc \
     && git init -q v \
     && cd v \
     && git remote add origin https://github.com/vlang/v.git \
     && git fetch -q --depth 1 origin "$V_COMMIT" \
     && git checkout -q FETCH_HEAD \
-    && make -j"$(nproc)" \
+    && git clone -q https://github.com/vlang/vc vc \
+    && git -C vc fetch -q --depth 1 origin "$VC_COMMIT" \
+    && git -C vc checkout -q FETCH_HEAD \
+    && make -f Makefile v \
     && ./v -version
 
 ENV PATH=/opt/v:$PATH

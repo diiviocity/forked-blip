@@ -19,7 +19,17 @@ RUN apt-get update \
 # The commit this project targets. Not the 0.5.2 release: vlang/v master at
 # this commit also reports itself as "V 0.5.2" and resolves modules
 # differently, which is the difference the project was bitten by.
+# vc is a SEPARATE repository from V and the Makefile clones it at HEAD,
+# unpinned. That is what broke this: a vc snapshot generated from a newer V
+# carries a parser that rejects the pinned V's own vlib -- vc HEAD gained
+# "reject `if` conditions that start with a parenthesized if expression" on
+# 2026-10-05, and vlib/math/bits/bits.v at this V_COMMIT uses that shape at
+# line 621. This is the vc snapshot taken just after V_COMMIT.
 ARG V_COMMIT=0137eb5d8ebc5d183259309ed08ea06ba9bc27d6
+
+# Building the `v` target directly rather than `all`, because `all` depends on
+# download_vc, which clones vc at HEAD and undoes the pin.
+ARG VC_COMMIT=64b1017fe300
 
 WORKDIR /opt
 RUN git init -q v \
@@ -27,7 +37,10 @@ RUN git init -q v \
     && git remote add origin https://github.com/vlang/v.git \
     && git fetch -q --depth 1 origin "$V_COMMIT" \
     && git checkout -q FETCH_HEAD \
-    && make -j"$(nproc)" \
+    && git clone -q https://github.com/vlang/vc vc \
+    && git -C vc fetch -q --depth 1 origin "$VC_COMMIT" \
+    && git -C vc checkout -q FETCH_HEAD \
+    && make -f Makefile v \
     && ./v -version
 
 ENV PATH=/opt/v:$PATH

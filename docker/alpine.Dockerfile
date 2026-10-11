@@ -24,13 +24,31 @@ RUN apk add --no-cache build-base git curl
 # differently, which is the difference the project was bitten by.
 ARG V_COMMIT=0137eb5d8ebc5d183259309ed08ea06ba9bc27d6
 
+# vc is the C source V bootstraps itself from, and it lives in a SEPARATE
+# repository from V. The Makefile clones it at HEAD -- unpinned -- which is what
+# broke the build: a vc snapshot generated from a newer V carries a parser that
+# rejects the pinned V's own vlib. vc HEAD gained "reject `if` conditions that
+# start with a parenthesized if expression" on 2026-10-05, and
+# vlib/math/bits/bits.v at this V_COMMIT uses exactly that shape at line 621, so
+# `make` died compiling a file the pinned commit itself ships.
+#
+# This is the vc snapshot taken just after V_COMMIT and before that change. The
+# `v` target is built directly rather than through `all`, because `all` depends
+# on download_vc, which clones vc at HEAD and undoes the pin.
+ARG VC_COMMIT=64b1017fe300
+
 WORKDIR /opt
-RUN git init -q v \
+RUN git config --global --add safe.directory /opt/v \
+    && git config --global --add safe.directory /opt/v/vc \
+    && git init -q v \
     && cd v \
     && git remote add origin https://github.com/vlang/v.git \
     && git fetch -q --depth 1 origin "$V_COMMIT" \
     && git checkout -q FETCH_HEAD \
-    && make -j"$(nproc)" \
+    && git clone -q https://github.com/vlang/vc vc \
+    && git -C vc fetch -q --depth 1 origin "$VC_COMMIT" \
+    && git -C vc checkout -q FETCH_HEAD \
+    && make -f Makefile v \
     && ./v -version
 
 ENV PATH=/opt/v:$PATH

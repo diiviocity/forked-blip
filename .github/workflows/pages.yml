@@ -24,6 +24,12 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       V_COMMIT: 0137eb5d8ebc5d183259309ed08ea06ba9bc27d6
+
+  # vc is the C source V bootstraps itself from, and it is a SEPARATE repository
+  # from V. Pinning V without pinning vc is what broke this: the Makefile clones
+  # vc at HEAD, so a snapshot built from a newer V was used to compile the
+  # pinned V's own vlib. This is the snapshot taken just after V_COMMIT.
+  VC_COMMIT: 64b1017fe300
       V_MACOS_V3_NO_FALLBACK: '1'
     steps:
       - uses: actions/checkout@v4
@@ -33,23 +39,31 @@ jobs:
           path: v
           key: v-${{ env.V_COMMIT }}-${{ runner.os }}-v2
 
-      # Build the compiler with the legacy Makefile explicitly.
+      # Build the compiler with the legacy Makefile explicitly, and with vc
+      # pinned.
       #
-      # The pinned commit ships two: `GNUmakefile`, whose `all` target pulls
-      # vc, tcc AND macports-legacy and drives them through bash helper
-      # scripts, and `Makefile`, whose `all` is `download_vc v` -- the shape
-      # this step was written for. GNU make prefers GNUmakefile over Makefile
-      # when both are present, so a bare `make` reads the newer one and fails
-      # on a dependency tree this workflow does not set up. `-f Makefile` says
-      # which one, and it is not parallel: `v` must not start before `vc` has
-      # been cloned, which a `-j` run does race.
+      # Two build files exist: `GNUmakefile`, whose `all` pulls vc, tcc AND
+      # macports-legacy through bash helpers, and `Makefile`, whose `all` is
+      # `download_vc v` -- the shape this step was written for. GNU make prefers
+      # GNUmakefile when both exist, so a bare `make` reads the newer one.
+      #
+      # vc is cloned at its own pin rather than left to the Makefile, which
+      # clones it at HEAD: that is what made a newer V's parser reject the
+      # pinned V's own vlib. The `v` target is built directly, because `all`
+      # depends on download_vc, which pulls vc back to HEAD.
       - name: Build V if needed
         run: |
+          set -e
           if [ ! -x v/v ]; then
             git init -q v && cd v
             git remote add origin https://github.com/vlang/v.git
             git fetch -q --depth 1 origin "$V_COMMIT"
-            git checkout -q FETCH_HEAD && make -f Makefile
+            git checkout -q FETCH_HEAD
+            git clone -q https://github.com/vlang/vc vc
+            git -C vc fetch -q --depth 1 origin "$VC_COMMIT"
+            git -C vc checkout -q FETCH_HEAD
+            make -f Makefile v
+            [ -x ./v ] || { echo "::error::no ./v produced"; exit 1; }
           fi
           echo "$GITHUB_WORKSPACE/v" >> "$GITHUB_PATH"
 
