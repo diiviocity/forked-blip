@@ -31,7 +31,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: v
-          key: v-${{ env.V_COMMIT }}
+          key: v-${{ env.V_COMMIT }}-${{ runner.os }}-v2
 
       - name: Build V if needed
         run: |

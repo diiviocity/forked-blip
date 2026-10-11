@@ -33,12 +33,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The key is the compiler commit AND the runner OS, versioned.
+      #
+      # The OS is in the key because `ubuntu-latest` changed underneath this
+      # workflow: a cache built by an older runner image stopped running on the
+      # current one, and `v version` failed inside a cache hit while the
+      # build step was skipped. A cache key on the compiler alone is a promise
+      # that a binary compiled on one image runs on every later one.
+      #
+      # The `-v2` is because the existing cache is poisoned and a key that only
+      # appends a component will not be re-run for a tree whose key is already
+      # warm: the whole point is to force a fresh build once.
       - name: Cache the V compiler
         id: vcache
         uses: actions/cache@v4
         with:
           path: v
-          key: v-${{ env.V_COMMIT }}
+          key: v-${{ env.V_COMMIT }}-${{ runner.os }}-v2
 
       - name: Build V
         if: steps.vcache.outputs.cache-hit != 'true'
