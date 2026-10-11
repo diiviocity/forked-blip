@@ -1193,13 +1193,23 @@ pub fn sort_by_keyed(items []blip.Value, keys []blip.Value) !blip.Value {
 fn prim_frequencies(args []blip.Value) !blip.Value {
 	items := seq(args[0])!
 	mut counts := map[string]blip.Value{}
+	// The first value seen for a key, so the emitted pair carries the ORIGINAL
+	// value rather than a string rebuilt from its printed form.
+	mut first := map[string]blip.Value{}
 	mut order := []string{}
 	mut i := 0
 	for i < items.len {
-		key := printer.write(items[i])
+		// A string is its own key. `printer.write` quotes a string, and using
+		// that as the key and then wrapping it back into a string is what put
+		// the quote characters into the data: `("the" 1)` came out as
+		// ("\"the\"" 1). Anything that is not a string still needs printing to
+		// be comparable at all.
+		v := items[i]
+		key := if v.tag == .string { v.as_string() } else { printer.write(v) }
 		if key !in counts {
 			order << key
 			counts[key] = blip.integer(0)
+			first[key] = v
 		}
 		old := counts[key].as_int()
 		counts[key] = blip.integer(old + 1)
@@ -1207,7 +1217,7 @@ fn prim_frequencies(args []blip.Value) !blip.Value {
 	}
 	mut out := []blip.Value{}
 	for k in order {
-		out << blip.list_from([blip.string(k), counts[k]])
+		out << blip.list_from([first[k], counts[k]])
 	}
 	return blip.list_from(out)
 }
