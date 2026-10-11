@@ -1,0 +1,35 @@
+# Build context exclusions. A COPY . would otherwise drag the whole history and
+# every binary in the tree into every layer of all three images.
+.git
+.gitignore
+
+# Generated, and rebuilt by tools/sitegen.v. Never edited.
+site_out
+
+# Installed packages: restored with `blip pkg install`, not baked in.
+blip_modules
+
+# Binaries and build products. The *.exe patterns matter on the Windows
+# development machine, where they are everywhere.
+*.exe
+*.o
+*.a
+*.so
+*.dll
+
+# V's intermediate output.
+*.vgen
+*.vtmp
+
+# npm output, for the editors/vscode extension.
+node_modules
+*.vsix
+tsconfig.tsbuildinfo
+
+# Packaged site release artifacts.
+dist
+*.tar.gz
+SHA256SUMS
+
+# Docker's own build context should not include another Docker's.
+.dockers/

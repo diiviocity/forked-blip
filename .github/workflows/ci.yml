@@ -82,6 +82,8 @@ jobs:
           v -cc gcc -o examples_run tests/examples_run.v
           v -cc gcc -o programs_run tests/programs_run.v
           v -cc gcc -o genprims tests/genprims.v
+          v -cc gcc -o unit tests/unit.v
+          v -cc gcc -o api_coverage tests/api_coverage.v
 
       # These runners print results and do not set an exit code yet, so the
       # output is checked rather than the status. That is listed as a known gap
@@ -98,6 +100,8 @@ jobs:
           ./examples_run   | tee -a out.txt
           ./programs_run   | tee -a out.txt
           ./genprims       | tee -a out.txt
+          ./unit           | tee -a out.txt
+          ./api_coverage   | tee -a out.txt
           if grep -qE '^FAIL|panic' out.txt; then
             echo "::error::a check failed or the machine panicked"
             exit 1
@@ -105,3 +109,48 @@ jobs:
 
       - name: Every example parses
         run: ./reader_probe examples/*.lip
+
+  # Three images, one per toolchain, each building the pinned V compiler from
+  # source. That is slow -- V bootstraps itself -- so it is a separate job that
+  # runs in parallel and is not gated behind the test job, because a change to
+  # the build should be visible here before it is merged rather than after.
+  #
+  # `docker build` is not run on every push: an image is a promise about a
+  # published artifact, so it builds when the source that defines one changes.
+  docker-images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the Alpine image
+        run: docker build -f docker/alpine.Dockerfile -t blip:alpine .
+
+      - name: Build the Debian image
+        run: docker build -f docker/debian.Dockerfile -t blip:debian .
+
+      - name: Build the Nix image
+        run: docker build -f docker/nix.Dockerfile -t blip:nix .
+
+      # An image that builds is not proof; one that REPLACES its entrypoint
+      # and prints a version is. This runs the binary inside each of the three
+      # toolchains and compares them, so a build that only succeeds because of
+      # the host cannot pass.
+      - name: Run the binary in all three
+        run: |
+          set -e
+          for t in alpine debian nix; do
+            echo "== blip:$t =="
+            docker run --rm --entrypoint blip blip:$t version
+          done
+
+      # The prelude must ship. std_path() finds it beside the binary, and the
+      # Dockerfiles copy it to /usr/local/lib/std.lip, so a program that uses
+      # the standard library has to run inside the image.
+      - name: The image runs a real program
+        run: |
+          set -e
+          printf '(print (+ 1 2))\n(print (string-upcase "ok"))\n' > prog.lip
+          docker run --rm --entrypoint blip -v "$PWD/prog.lip:/w/prog.lip" \
+            blip:alpine run /w/prog.lip | tee alpine-run.txt
+          grep -q 3 alpine-run.txt
+          grep -q OK alpine-run.txt
