@@ -62,8 +62,7 @@ jobs:
           git remote add origin https://github.com/vlang/v.git
           git fetch -q --depth 1 origin "$V_COMMIT"
           git checkout -q FETCH_HEAD
-          make
-
+          make -f Makefile
       - name: Put V on PATH
         run: echo "$GITHUB_WORKSPACE/v" >> "$GITHUB_PATH"
 

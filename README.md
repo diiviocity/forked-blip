@@ -92,9 +92,21 @@ irm https://metif12.github.io/blip/install.ps1 | iex
 
 ### Docker
 
+Three toolchains, each building the pinned V compiler from source, in
+`docker/`. CI builds and runs all three on every push.
+
 ```sh
-docker run --rm -it ghcr.io/metif12/blip:latest
+docker build -f docker/alpine.Dockerfile -t blip:alpine .
+docker run --rm blip:alpine run examples/01_basics.lip
 ```
+
+`docker/debian.Dockerfile` and `docker/nix.Dockerfile` build the same image
+for the other two toolchains. Use `-f` with the file you want and `-t` to name
+it; the three are interchangeable and differ only in the C toolchain.
+
+> The images are built and exercised by CI but are **not** published to a
+> registry. There is no `ghcr.io/metif12/blip` image, and no `docker run` from a
+> remote will work until one is.
 
 ### From source
 

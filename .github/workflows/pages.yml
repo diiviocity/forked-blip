@@ -33,13 +33,23 @@ jobs:
           path: v
           key: v-${{ env.V_COMMIT }}-${{ runner.os }}-v2
 
+      # Build the compiler with the legacy Makefile explicitly.
+      #
+      # The pinned commit ships two: `GNUmakefile`, whose `all` target pulls
+      # vc, tcc AND macports-legacy and drives them through bash helper
+      # scripts, and `Makefile`, whose `all` is `download_vc v` -- the shape
+      # this step was written for. GNU make prefers GNUmakefile over Makefile
+      # when both are present, so a bare `make` reads the newer one and fails
+      # on a dependency tree this workflow does not set up. `-f Makefile` says
+      # which one, and it is not parallel: `v` must not start before `vc` has
+      # been cloned, which a `-j` run does race.
       - name: Build V if needed
         run: |
           if [ ! -x v/v ]; then
             git init -q v && cd v
             git remote add origin https://github.com/vlang/v.git
             git fetch -q --depth 1 origin "$V_COMMIT"
-            git checkout -q FETCH_HEAD && make
+            git checkout -q FETCH_HEAD && make -f Makefile
           fi
           echo "$GITHUB_WORKSPACE/v" >> "$GITHUB_PATH"
 
@@ -81,6 +91,13 @@ jobs:
           cp -r site/assets site_out/assets
           cp README.md site_out/README.md
           cp CONTRIBUTING.md site_out/CONTRIBUTING.md
+          # The installers. The README and the site both tell a reader to run
+          # `curl -fsSL https://metif12.github.io/blip/install.sh | bash`, and
+          # those URLs 404ed: the scripts lived in site/ but nothing ever copied
+          # them into site_out, so the one-liner the whole install section
+          # depends on pointed at a file that was never published.
+          cp site/install.sh site/install.ps1 site_out/
+          chmod +x site_out/install.sh
           test -f site_out/index.html
 
       - uses: actions/configure-pages@v5
