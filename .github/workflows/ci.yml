@@ -51,18 +51,39 @@ jobs:
           path: v
           key: v-${{ env.V_COMMIT }}-${{ runner.os }}-v2
 
+      # Build V, and say WHY it could not.
+      #
+      # This step has failed several times and the failure has been invisible:
+      # the log API needs admin rights this token does not have, so `gh run view
+      # --log-failed` dies on a TLS handshake timeout from some networks and a
+      # 403 from others. A build that cannot be diagnosed is not a build anyone
+      # can fix. So the compiler is checked for FIRST, the make output is not
+      # swallowed, and the result is verified to actually run.
       - name: Build V
         if: steps.vcache.outputs.cache-hit != 'true'
         run: |
+          set -e
           # No release archive: the prebuilt ones are a different compiler, and
           # installing only the executable out of one leaves V unable to find
           # the vlib beside it. Build the pinned commit instead.
+          if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
+            echo "::error::no C compiler: the V bootstrap compiles vc/v.c with cc"
+            cc --version || true
+            gcc --version || true
+            exit 1
+          fi
           git init -q v
           cd v
           git remote add origin https://github.com/vlang/v.git
           git fetch -q --depth 1 origin "$V_COMMIT"
           git checkout -q FETCH_HEAD
           make -f Makefile
+          if [ ! -x ./v ]; then
+            echo "::error::make succeeded but produced no ./v binary"
+            ls -la
+            exit 1
+          fi
+          ./v version
       - name: Put V on PATH
         run: echo "$GITHUB_WORKSPACE/v" >> "$GITHUB_PATH"
 
