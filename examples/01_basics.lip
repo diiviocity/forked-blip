@@ -27,10 +27,10 @@
 
 ;; --- the truthiness rule ---
 ;; Only #f is false. Unlike Ruby and JavaScript:
-0                 ;=>  true
-""                ;=>  true
-()                ;=>  true
-#f                ;=>  false
+0                 ;; =>  true
+""                ;; =>  true
+()                ;; =>  true
+#f                ;; =>  false
 
 ;; --- lists and quotes ---
 '(1 2 3)          ; a quoted list of three integers

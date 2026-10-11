@@ -563,10 +563,17 @@ fn (mut m Machine) hof(name string, args []blip.Value) ! {
 		return error('${name} expects at least 2 arguments, got ${args.len}')
 	}
 	f := args[0]
-	items := prims.seq(args[1]) or {
+	src := args[1]
+	items := prims.seq(src) or {
 		return error('${name}: ${err.msg()}')
 	}
-	want_vector := name == 'vector-map'
+	// The container comes from the INPUT, not the name. `vector-map` is a name
+	// that says "map, and give me a vector", and it used to be the only way to
+	// get one: `(map f [1 2 3])` answered `(1 4 9)`, a list, so the caller had
+	// to know to spell the function differently to keep the type they passed in.
+	// Reading `src.tag` costs nothing and makes map over a vector give a vector.
+	want_vector := src.tag == .vector || src.tag == .array
+		|| name == 'vector-map'
 	keep := name in ['filter', 'keep']
 	drop := name == 'reject'
 	mut out := []blip.Value{}
@@ -767,30 +774,32 @@ fn (mut m Machine) result_combinator(name string, args []blip.Value) ! {
 	if args.len != 2 {
 		return error('${name} expects 2 arguments, got ${args.len}')
 	}
-	lazy := name.starts_with('lazy-')
-	if !is_result_of(args[0], 'ok') {
-		if !lazy {
-			// The eager forms run the function anyway, because in a Lisp you cannot
-			// stop an argument being evaluated. Wrapping the result so the
-			// arguments become `(fn [] ...)` is the honest way to get laziness, and
-			// `lazy-` names are the wrapper.
-			if name == 'map-result' || name == 'try-result' {
-				m.val = args[1]
-				m.ret()
-				return
+	lazy_unwrap := name == 'lazy-unwrap'
+	if is_result_of(args[0], 'ok') {
+		if lazy_unwrap {
+			rest := prims.seq(args[0])!
+			if rest.len > 1 {
+				m.val = rest[1]
+			} else {
+				m.val = blip.nil_value()
 			}
+			m.ret()
+			return
 		}
-		m.val = args[0]
+	} else if lazy_unwrap {
+		// lazy-unwrap on an (err _) RUNS the thunk, which is the whole reason it
+		// takes a function: `unwrap-or` has its default evaluated on every call,
+		// this one only pays for it when there is no value to unwrap.
+		m.val = m.call_value(args[1], []blip.Value{})!
 		m.ret()
 		return
-	}
-	if name == 'lazy-unwrap' {
-		rest := prims.seq(args[0])!
-		if rest.len > 1 {
-			m.val = rest[1]
-		} else {
-			m.val = blip.nil_value()
-		}
+	} else {
+		// map-result, try-result and lazy-map-result all pass an (err _)
+		// straight through. They used to return args[1] instead -- the FUNCTION
+		// itself -- which printed as `#<closure`. There was nothing to curry:
+		// the application had already evaluated the second argument, so the
+		// only thing left to do with the error was hand it back.
+		m.val = args[0]
 		m.ret()
 		return
 	}
@@ -1492,11 +1501,17 @@ fn (mut m Machine) call_primitive(name string, args []blip.Value) ! {
 			all << args[0]
 			mut i := 1
 			for i < args.len {
-				a := args[i]
-				mut cur := a
-				for cur.tag == .pair {
-					all << cur.as_pair().car
-					cur = cur.as_pair().cdr
+				// Any sequence is spliced, not just a pair. `(apply + [1 2 3])`
+				// used to splice nothing -- `[1 2 3]` is a .vector, the loop
+				// below matched only .pair -- so apply_all was handed `(+)` and
+				// returned 0. A sequence is a sequence whichever tag it wears.
+				elems := prims.seq(args[i]) or {
+					all << args[i]
+					i++
+					continue
+				}
+				for e in elems {
+					all << e
 				}
 				i++
 			}
@@ -1703,18 +1718,25 @@ k := m.kstack[idx]
 			// ok(ok(1)) => ok(1); ok(err('inner')) => err('inner'). One level of
 			// flattening only, because a nested result deeper than that is a bug in
 			// the caller rather than something to normalise silently.
-			inner_kind := kind_of(args[0])
-			if inner_kind == 'nil' {
-				m.val = args[0]
-				m.ret()
-				return
+			//
+			// The flattened value is the INNER result, not a rebuilt pair carrying
+			// the outer kind. Rebuilding is what made `(ok (ok 1))` come back as
+			// itself: the code kept the outer `ok` and handed the inner value
+			// straight through, so one level was peeled and then put back.
+			if is_result_of(args[0], 'ok') {
+				rest := prims.seq(args[0]) or {
+					return error('flatten-result: ${err.msg()}')
+				}
+				if rest.len > 1 {
+					inner := rest[1]
+					if is_result_of(inner, 'ok') || is_result_of(inner, 'err') {
+						m.val = inner
+						m.ret()
+						return
+					}
+				}
 			}
-			deeper := kind_of(inner_value(args[0]))
-			if deeper != 'nil' {
-				m.val = blip.list_from([blip.symbol(inner_kind), inner_value(args[0])])
-			} else {
-				m.val = args[0]
-			}
+			m.val = args[0]
 			m.ret()
 			return
 		}
@@ -3079,7 +3101,7 @@ fn (mut m Machine) eval_struct(kids []blip.NodeId) ! {
 	for f in fields {
 		src += '(define ${low}-${f} (fn [v] (struct-ref v (quote ${f}))))\n'
 		if mutable {
-			src += '(define set-${low}-${f}! (fn [v x] (struct-set! v (quote ${f}) x)))\n'
+			src += '(define set-${low}-${f}! (fn [v x] (__struct-mutate! v (quote ${f}) x)))\n'
 		}
 	}
 	if opaque {

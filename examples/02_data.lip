@@ -34,7 +34,7 @@
 {:name "ada" :born 1815}
 (get {:a 1} :a)             ;=> 1
 (get {:a 1} :missing)       ;=> nil      absent is nil, not an error
-(get {:a 1} :missing 'def)  ;=> "def"    with a default
+(get {:a 1} :missing "def")   ;=> "def"    with a default
 (put {:a 1} :b 2)           ;=> {:a 1 :b 2}
 (remove {:a 1} :a)          ;=> {}
 (has-key? {:a 1} :a)        ;=> #t
@@ -45,12 +45,12 @@
 (def arr @(1 2 3))
 (array-set! arr 0 99)       ; returns nothing; mutates in place
 (array-ref arr 0)           ;=> 99
-(array-push! arr 4)         ;=> arr, now length 4
+(array-push! arr 4)         ;; => arr, now length 4
 (array-length arr)          ;=> 4
 
 ;; --- buffers: mutable hash map ---
 (def buf @{:count 0})
-(put! buf :count (+ (get buf :count) 1))   ;=> nothing
+(put! buf :count (+ (get buf :count) 1))   ;; => nothing
 (get buf :count)                          ;=> 1
 
 ;; --- every collection is callable ---

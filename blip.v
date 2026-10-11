@@ -264,11 +264,24 @@ fn expectation(lines []string, lineno int) string {
 		return ''
 	}
 	line := lines[lineno - 1]
-	idx := line.index(';=>') or {
-		spaced := line.index('; =>') or { return '' }
-		return first_chunk(line[spaced + 4..])
+	mut idx := line.index(';=>') or { -1 }
+	mut width := 3
+	if idx < 0 {
+		idx = line.index('; =>') or { -1 }
+		width = 4
 	}
-	return first_chunk(line[idx + 3..])
+	if idx < 0 {
+		return ''
+	}
+	// A doubled semicolon is a prose comment, not an expectation. `;; => true`
+	// documents a fact about the line above it -- `0 ;=> true` under a heading
+	// saying only #f is false is prose about truthiness, not a value -- and it
+	// still contains `; =>`, which is why the marker alone is not enough and
+	// the delimiter in front of it has to be checked.
+	if idx > 0 && line[idx - 1] == `;` {
+		return ''
+	}
+	return first_chunk(line[idx + width..])
 }
 
 // first_chunk returns the expected value and drops the prose that follows it.
@@ -349,6 +362,13 @@ fn run_tests(paths []string) int {
 		for id in forms.forms {
 			d := m.arena.node(id)
 			want := expectation(lines, d.line)
+			// What the form PRINTED is the answer when it printed anything.
+			// `(print (greeting "world"))` returns nil, so comparing the value
+			// against a `;=> "Hello, world."` expectation is comparing nil
+			// against a string and calling that a failure -- while the program
+			// printed exactly what it was documented to print. The machine
+			// already routes print through the host, so the output is here.
+			before := m.out.len
 			v := m.eval_one(id) or {
 				if want.len > 0 {
 					s.check(path, d.line, want, 'error: ${err.msg()}')
@@ -357,6 +377,11 @@ fn run_tests(paths []string) int {
 			}
 			if want.len > 0 {
 				s.checks++
+				if m.out.len > before {
+					printed := m.out[before..].join('').trim_right('\n').trim_space()
+					s.check(path, d.line, want, printed)
+					continue
+				}
 				s.check(path, d.line, want, printer.write(v))
 			}
 		}

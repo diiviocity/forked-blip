@@ -133,6 +133,7 @@ pub fn table() map[string]blip.PrimFn {
 	p['struct-name'] = prim_struct_name
 	p['struct-ref'] = prim_struct_ref
 	p['struct-set!'] = prim_struct_set
+p['__struct-mutate!'] = prim_struct_mutate
 	p['integer->rune'] = prim_integer_to_rune
 	p['rune->integer'] = prim_rune_to_integer
 	p['string->rune'] = prim_string_to_rune
@@ -297,7 +298,17 @@ fn prim_div(args []blip.Value) !blip.Value {
 	if b == 0 {
 		return error('division by zero')
 	}
-	return blip.integer(need_int('/', args[0])! / b)
+	a := need_int('/', args[0])!
+	if a % b == 0 {
+		return blip.integer(a / b)
+	}
+	// Exact is exact: 10/5 is 2. Everything else is a decimal, and `(/ 10 4)`
+	// answers 2.5 rather than 2 -- integer division here threw away the
+	// remainder and gave an answer that was wrong rather than approximate.
+	// A rational is not used because the printer renders a rational as `5/2`,
+	// which is not what the example asks for, and a decimal that terminates is
+	// the honest rendering of a value this language does not otherwise carry.
+	return blip.float(f64(a) / f64(b))
 }
 
 // ------------------------------------------------------------- comparison
@@ -335,7 +346,12 @@ pub fn value_eq(a blip.Value, b blip.Value) bool {
 				x = x.as_pair().cdr
 				y = y.as_pair().cdr
 			}
-			return x.tag == .nil && y.tag == .nil
+			// Both must be EMPTY, and either spelling of empty counts. A quoted
+			// list ends in .emptylist while a consed one ends in .nil, so
+			// demanding .nil alone made `(= '(1 2) '(1 2))` answer #f for two
+			// lists with identical contents -- the walk ran to the end, compared
+			// .emptylist against .emptylist, and rejected it.
+			return x.is_empty_seq() && y.is_empty_seq()
 		}
 		.vector {
 			x := a.as_vector().data
@@ -484,6 +500,26 @@ pub fn is_seq(v blip.Value) bool {
 	return v.tag in [.pair, .emptylist, .nil, .vector, .array]
 }
 
+// seq_like rebuilds `items` in the same container `src` was. A sequence
+// primitive that answered with a list for every input would silently change the
+// type of the answer, and the printer shows the difference: a vector prints as
+// [1 2 3] and a list as (1 2 3).
+fn seq_like(src blip.Value, items []blip.Value) blip.Value {
+	if src.tag == .array {
+		return blip.Value{
+			tag:     .array
+			payload: &blip.Vector{
+				tag:  .array
+				data: items
+			}
+		}
+	}
+	if src.tag == .vector {
+		return blip.vector(items)
+	}
+	return blip.list_from(items)
+}
+
 fn prim_car(args []blip.Value) !blip.Value {
 	if args[0].tag != .pair {
 		return error('car expects a pair, got ${printer.write(args[0])}')
@@ -529,14 +565,14 @@ fn prim_length(args []blip.Value) !blip.Value {
 }
 
 fn prim_reverse(args []blip.Value) !blip.Value {
-	mut items := list_slice(args[0])!
-	mut out := blip.nil_value()
+	items := seq(args[0])!
+	mut out := []blip.Value{}
 	mut i := items.len - 1
 	for i >= 0 {
-		out = blip.cons(items[i], out)
+		out << items[i]
 		i--
 	}
-	return out
+	return seq_like(args[0], out)
 }
 
 fn prim_append(args []blip.Value) !blip.Value {
@@ -961,6 +997,23 @@ fn prim_struct_set(args []blip.Value) !blip.Value {
 	}
 }
 
+// __struct-mutate! writes a field of a mutable struct in place. `struct-set!`
+// above is functional and returns a copy, which is correct for the immutable
+// case: a `#:mutable` struct's generated mutator calls this instead, because
+// its caller discards the return value and only an in-place write is visible.
+fn prim_struct_mutate(args []blip.Value) !blip.Value {
+	if args[0].tag != .struct_ {
+		return error('__struct-mutate!: ${printer.write(args[0])} is not a struct')
+	}
+	s := args[0].as_struct()
+	k := need_str('__struct-mutate!', args[1])!
+	if !s.has(k) {
+		return error('__struct-mutate!: ${s.name} has no field ${k}')
+	}
+	s.set(k, args[2])
+	return args[0]
+}
+
 // __make-struct is the constructor the `struct` form generates. It takes the name,
 // the field names, and the values, and returns an instance.
 fn prim_make_struct(args []blip.Value) !blip.Value {
@@ -1102,7 +1155,7 @@ fn prim_sort(args []blip.Value) !blip.Value {
 		}
 		i++
 	}
-	return blip.list_from(ordered)
+	return seq_like(args[0], ordered)
 }
 
 // sort_by takes a KEY fntion, which needs the machine, so this is only the
@@ -1439,11 +1492,30 @@ fn prim_expt(args []blip.Value) !blip.Value {
 }
 
 fn prim_sqrt(args []blip.Value) !blip.Value {
-	f := as_f64(args[0])!
-	if f < 0.0 {
+	a := args[0]
+	if a.tag == .float {
+		f := as_f64(a)!
+		if f < 0.0 {
+			return error('sqrt of a negative number')
+		}
+		return blip.float(math.sqrt(f))
+	}
+	// An integer goes in, and an integer comes out whenever the answer is exact.
+	// `(dist (Point 3 4))` sqrted 25 into 5.0 and the value that reached the
+	// caller was a float, so a distance compared unequal to the number it
+	// obviously was. sqrt is exact for a perfect square, and pretending
+	// otherwise is the numeric tower leaking into a result.
+	n := need_int('sqrt', a)!
+	if n < 0 {
 		return error('sqrt of a negative number')
 	}
-	return blip.float(math.sqrt(f))
+	r := int(math.sqrt(f64(n)))
+	if i64(r) * i64(r) == n {
+		return blip.integer(r)
+	}
+	// Not a perfect square: stay a float rather than invent a rational, because
+	// an irrational root has no exact form to invent one from.
+	return blip.float(math.sqrt(f64(n)))
 }
 
 fn prim_inc(args []blip.Value) !blip.Value {

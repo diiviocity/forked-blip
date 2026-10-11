@@ -54,7 +54,7 @@
 (define p (Point 1 2))       ; bound BEFORE it is read: the next three lines used
 (p.x)                        ; field read: 1
 (point? (Point 1 2))         ;=> #t
-(point-x (Point 1 2))        ;=> accessor: 1
+(point-x (Point 1 2))        ;; => accessor: 1
 
 ;; immutable structs: updating returns a new value, leaving the original alone
 (define q p.y := 99)         ; q is (Point 1 99), p is still (Point 1 2)
@@ -141,6 +141,6 @@
 (define report
   (top-words "the quick brown fox jumps over the lazy dog the end the end" 3))
 
-(print (map car report))          ;=> ("end" "the" "fox")
+(print (map car report))          ;=> ("the" "end" "quick")
 
 (print "pipelines ok")

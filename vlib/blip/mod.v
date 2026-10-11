@@ -119,6 +119,10 @@ pub struct StructVal {
 pub:
 	name   string
 	fields []string
+mut:
+	// mutable because a `#:mutable` struct's generated mutator writes through
+	// here in place; the immutable case still goes through `with`, which
+	// builds a new map and never touches this field.
 	values map[string]Value
 }
 
@@ -159,6 +163,19 @@ pub fn (s &StructVal) with(k string, v Value) &StructVal {
 		fields: s.fields
 		values: mm
 	}
+}
+
+// set writes a field IN PLACE and is what a `#:mutable` struct's generated
+// mutator uses.
+//
+// `with` is the functional one: it builds a fresh map and hands back a new
+// struct, which is right for the immutable case and useless for the mutable
+// one -- the caller of `(set-counter-n! c 5)` ignores whatever the function
+// returns, so the write has to land in the map the caller is still holding.
+// A V map is a reference, so writing through this receiver reaches the same
+// StructVal the variable points at.
+pub fn (mut s StructVal) set(k string, v Value) {
+	s.values[k] = v
 }
 
 pub fn (t &Table) payload_tag() Tag {
