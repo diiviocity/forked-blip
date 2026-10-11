@@ -2,6 +2,7 @@ module main
 
 import os
 import vlib.blip
+import vlib.blip.emit
 import vlib.blip.host
 import vlib.blip.lsp
 import vlib.blip.machine
@@ -185,6 +186,33 @@ fn run_files(paths []string) int {
 	return code
 }
 
+// ---- emit-js -------------------------------------------------------------
+
+fn emit_js(paths []string) int {
+	mut code := 0
+	for path in paths {
+		src := os.read_file(path) or {
+			eprintln('blip: cannot read ${path}')
+			code = 1
+			continue
+		}
+		res := emit.compile(src) or {
+			eprintln('blip: ${path}: ${err.msg()}')
+			code = 1
+			continue
+		}
+		if res.blocked.len > 0 {
+			// Refusal is reported, not hidden: silently emitting `undefined`
+			// for a form the engine does not understand is how a backend ends
+			// up wrong in a way nobody can see.
+			eprintln('blip: ${path}: not emitted: ${res.blocked.join(', ')}')
+			code = 1
+		}
+		println(res.js)
+	}
+	return code
+}
+
 fn start_repl() int {
 	mut r := repl.new(&host.ConsoleHost{})
 	std := std_path()
@@ -220,6 +248,14 @@ fn main() {
 				exit_code(2)
 			}
 			exit_code(run_tests(args[1..]))
+		}
+		'emit-js' {
+			if args.len < 2 {
+				eprintln('blip: emit-js needs a file')
+				eprintln('run `blip help emit-js` for usage')
+				exit_code(2)
+			}
+			exit_code(emit_js(args[1..]))
 		}
 		'lsp' {
 			lsp.serve()
