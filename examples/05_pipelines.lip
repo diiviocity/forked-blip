@@ -51,18 +51,18 @@
 
 (struct Point (x y))
 (Point 1 2)                  ;=> (Point 1 2)
+(define p (Point 1 2))       ; bound BEFORE it is read: the next three lines used
 (p.x)                        ; field read: 1
 (point? (Point 1 2))         ;=> #t
-(point-x (Point 1 2))        ; accessor: 1
+(point-x (Point 1 2))        ;=> accessor: 1
 
 ;; immutable structs: updating returns a new value, leaving the original alone
-(define p (Point 1 2))
 (define q p.y := 99)         ; q is (Point 1 99), p is still (Point 1 2)
 
 ;; #:mutable for the rare in-place case
 (struct Counter (n) #:mutable)
 (def c (Counter 0))
-(set-c.n! c 5)
+(set-counter-n! c 5)               ; the mutator is set-STRUCTNAME-FIELD!
 (c.n)                        ;=> 5
 
 ;; --- structs are callable: a struct used in function position is a lookup ---
@@ -128,13 +128,15 @@
 ;; =====================================================================
 
 ;; Word frequency, top three. No macros. No nesting. No closures-per-element.
+;; `take` takes (coll n), so it is threaded with `->` rather than `->>`: the
+;; value has to land in the FIRST slot, and `->>` puts it in the last.
 (define (top-words text n)
-  (->> (string-split text " ")
-       (keep string-not-blank?)
-       (map string-downcase)
-       (frequencies)
-       (sort-by (fn (e) (- (get e 1))))
-       (take n)))
+  (-> (->> (string-split text " ")
+           (keep string-not-blank?)
+           (map string-downcase)
+           (frequencies)
+           (sort-by (fn (e) (- (get e 1)))))
+      (take n)))
 
 (define report
   (top-words "the quick brown fox jumps over the lazy dog the end the end" 3))

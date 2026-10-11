@@ -14,15 +14,15 @@ module printer
 
 import math
 import strconv
-import vlib.vlip
-import vlib.vlip.reader
+import vlib.blip
+import vlib.blip.reader
 
 // ------------------------------------------------------------------ values
 
 // Cycle detection: an id is "currently being printed" if it is in `active`.
 // `seen` counts how many times an id was printed, so shared structure can be
 // annotated with (@1) rather than silently duplicated or misreported as a cycle.
-fn write_value(v vlip.Value, active []u64, seen map[u64]int, depth int) string {
+fn write_value(v blip.Value, active []u64, seen map[u64]int, depth int) string {
 	if depth > 40 {
 		return '...'
 	}
@@ -30,6 +30,7 @@ fn write_value(v vlip.Value, active []u64, seen map[u64]int, depth int) string {
 	
 	match v.tag {
 		.nil { return 'nil' }
+		.emptylist { return '()' }
 		.boolean { return if v.as_bool() { '#t' } else { '#f' } }
 		.integer { return strconv.format_int(v.as_int(), 10) }
 		.rune { return char_literal(i32(v.i)) }
@@ -49,6 +50,18 @@ fn write_value(v vlip.Value, active []u64, seen map[u64]int, depth int) string {
 		.pair { return write_list(v, active, seen, depth) }
 		.vector { return write_vector(v, active, seen, depth) }
 		.table { return write_table(v, active, seen, depth) }
+		.struct_ {
+			s := v.as_struct()
+			mut parts := []string{}
+			mut i := 0
+			for i < s.fields.len {
+				parts << write_value(s.at(i), active, seen, depth + 1)
+				i++
+			}
+			// Field order is the declaration order, NOT sorted: a struct prints the
+			// way it was written, which is what makes a wrong value obvious.
+			return '(' + s.name + ' ' + parts.join(' ') + ')'
+		}
 		.array { return '@[' + write_seq(v, active, seen, depth) + ']' }
 		.buffer { return '@{' + write_table_body(v, active, seen, depth) + '}' }
 		.closure { return '#<closure>' }
@@ -64,7 +77,7 @@ fn write_value(v vlip.Value, active []u64, seen map[u64]int, depth int) string {
 // Cycle detection therefore only guards against unbounded nesting depth, which the
 // depth limit already covers. Kept as a hook for a future address API.
 
-fn write_list(v vlip.Value, active []u64, seen map[u64]int, depth int) string {
+fn write_list(v blip.Value, active []u64, seen map[u64]int, depth int) string {
 	// A local copy: mutating the parameter would require `mut` at every call
 	// site, and V 0.5.2 is strict about that in ways that obscure real errors.
 	mut path := []u64{cap: active.len + 1}
@@ -89,13 +102,13 @@ fn write_list(v vlip.Value, active []u64, seen map[u64]int, depth int) string {
 	return out
 }
 
-fn write_vector(v vlip.Value, active []u64, seen map[u64]int, depth int) string {
+fn write_vector(v blip.Value, active []u64, seen map[u64]int, depth int) string {
 	mut path := []u64{cap: active.len + 1}
 	path << active
 	return '[' + write_seq(v, path, seen, depth) + ']'
 }
 
-fn write_seq(v vlip.Value, active []u64, seen map[u64]int, depth int) string {
+fn write_seq(v blip.Value, active []u64, seen map[u64]int, depth int) string {
 	vec := v.as_vector()
 	mut parts := []string{}
 	for item in vec.data {
@@ -113,11 +126,11 @@ fn write_seq(v vlip.Value, active []u64, seen map[u64]int, depth int) string {
 	return out
 }
 
-fn write_table(v vlip.Value, active []u64, seen map[u64]int, depth int) string {
+fn write_table(v blip.Value, active []u64, seen map[u64]int, depth int) string {
 	return '{' + write_table_body(v, active, seen, depth) + '}'
 }
 
-fn write_table_body(v vlip.Value, active []u64, seen map[u64]int, depth int) string {
+fn write_table_body(v blip.Value, active []u64, seen map[u64]int, depth int) string {
 	mut keys := v.as_table().keys()
 	// Sorted so that printing is deterministic: a table whose iteration order
 	// varied between runs would make every error message unreproducible.
@@ -139,7 +152,7 @@ fn write_table_body(v vlip.Value, active []u64, seen map[u64]int, depth int) str
 }
 
 // write is the entry point for runtime values.
-pub fn write(v vlip.Value) string {
+pub fn write(v blip.Value) string {
 	return write_value(v, []u64{}, map[u64]int{}, 0)
 }
 

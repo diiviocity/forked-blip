@@ -99,6 +99,8 @@ pub mut:
 	den   i64    // rational denominator
 	start i32    // children range into Arena.children
 	count i32
+	line  int
+	col   int
 }
 
 pub struct Arena {
@@ -165,17 +167,36 @@ pub fn (mut a Arena) finish(id NodeId, items []NodeId) {
 	node.count = i32(items.len)
 }
 
-// add_child appends a single child immediately. Only safe when the parent has no
-// nested children yet; finish() is the general case.
+// add_child appends a single child immediately.
+//
+// It is only correct when the parent is the LAST thing that has appended to
+// `children` -- that is, when the parent was created after everything already
+// read. It cannot be used for a node that was created before other children were
+// appended, because it leaves `start` at 0 and so writes into whatever form
+// happened to occupy children[0].
+//
+// It was used for `'` and `` ` ``, whose wrapper node is created immediately
+// before its operand. Every `'(...)` in a file whose first form was a list put
+// its operand at children[0], i.e. as the first child of the FIRST top-level
+// form. `'after` after a `define` therefore evaluated the symbol `define` and
+// printed it -- silently, because the value it produced was a perfectly valid
+// symbol. `finish` has no such precondition; use it.
 pub fn (mut a Arena) add_child(parent NodeId, child NodeId) {
+	start := i32(a.children.len)
 	a.children << child
 	mut node := &a.nodes[int(parent)]
-	node.count++
-	node.start = int(node.start)
+	node.count = 1
+	node.start = start
 }
 
 pub fn (a &Arena) node(id NodeId) &Datum {
 	return &a.nodes[int(id)]
+}
+
+pub fn (mut a Arena) set_pos(id NodeId, line int, col int) {
+	mut node := &a.nodes[int(id)]
+	node.line = line
+	node.col = col
 }
 
 // kids returns a COPY of a node's children.
@@ -208,6 +229,11 @@ pub:
 	msg  string
 	line int
 	col  int
+	// incomplete marks "this form is not finished yet", which is a different
+	// thing from "this form is wrong". A file reader turns it into a syntax error,
+	// because a file that ends mid-bracket IS broken. A REPL has to keep reading
+	// instead, and cannot tell the two cases from the message text.
+	incomplete bool
 }
 
 pub fn (d &Diagnostic) render(path string) string {
@@ -230,6 +256,17 @@ fn (mut r Reader) fail(msg string) {
 		msg:  msg
 		line: r.line
 		col:  r.off - r.line_at + 1
+	}
+}
+
+// short is the same, but says the form is unfinished rather than wrong. The only
+// difference is the flag, which is the whole point: a REPL keeps reading on it.
+fn (mut r Reader) short(msg string) {
+	r.diags << Diagnostic{
+		msg:        msg
+		line:       r.line
+		col:        r.off - r.line_at + 1
+		incomplete: true
 	}
 }
 
@@ -312,12 +349,24 @@ mut depth := 1
 }
 
 // read returns the next form's NodeId, or none at end of input.
+//
+// It wraps read_inner with position tracking: the line and column of the first
+// byte of the form are recorded on the node, so an error message can later show
+// where in the source the form was written.
 pub fn (mut r Reader) read() ?NodeId {
 	r.skip_ws()
 	if r.eof() {
 		return none
 	}
-c := r.peek()
+	line := r.line
+	col := r.off - r.line_at + 1
+	id := r.read_inner() or { return none }
+	r.arena.set_pos(id, line, col)
+	return id
+}
+
+fn (mut r Reader) read_inner() ?NodeId {
+	c := r.peek()
 	match c {
 		lparen {
 			r.next()
@@ -330,6 +379,34 @@ c := r.peek()
 		lbrace {
 			r.next()
 			return r.read_collection(.table, rbrace)
+		}
+		at_c {
+			// `@(...)`, `@[...]`, `@{...}` -- the mutable counterparts of the three
+			// literal collection forms. The tag is on the VALUE, which is how
+			// mutability is made visible without a type system: `@(1 2 3)` is an
+			// array and `(1 2 3)` is a list.
+			//
+			// Without this the `@` read as an ordinary symbol and the collection
+			// after it as an ordinary list, so `@(1 2 3)` failed at the symbol `@`
+			// with "unbound identifier: @" -- which says nothing about where the
+			// problem is.
+			nxt := r.at(r.off + 1)
+			if nxt == lparen {
+				r.next()
+				r.next()
+				return r.read_collection(.array, rparen)
+			}
+			if nxt == lbrack {
+				r.next()
+				r.next()
+				return r.read_collection(.array, rbrack)
+			}
+			if nxt == lbrace {
+				r.next()
+				r.next()
+				return r.read_collection(.buffer, rbrace)
+			}
+			return r.read_atom()
 		}
 		rparen | rbrack | rbrace {
 			r.fail('unexpected byte 0x' + c.hex())
@@ -366,7 +443,30 @@ tag := match c {
 			return r.read_string()
 		}
 		`|` {
-			return r.read_bar_symbol()
+			// `|...|` is a symbol written literally, but `|>`, `|*>`, `||` and the
+			// rest are OPERATORS, and the two are told apart by what follows the
+			// bar: a space or a closing bracket means a literal symbol, anything else
+			// means an operator name that ends at the next delimiter.
+			//
+			// Without this, `(->> x |> string-upcase)` read `|> string-upcase ` as
+			// one bar-symbol and then reported `unbound identifier: > string-upcase`.
+			// The reader's own diagnostic count was zero, which is the useful part:
+			// `|>` is a perfectly valid token, just the wrong one.
+			nxt := r.at(r.off + 1)
+			if nxt == u8(0) || nxt == sp || nxt == tab_c || nxt == nl || nxt == cr
+				|| nxt == rparen || nxt == rbrack || nxt == rbrace {
+				return r.read_bar_symbol()
+			}
+			mut op := []u8{}
+			for !r.eof() {
+				ch := r.peek()
+				if ch == sp || ch == tab_c || ch == nl || ch == cr || ch == rparen
+					|| ch == rbrack || ch == rbrace {
+					break
+				}
+				op << r.next()
+			}
+			return r.arena.str_leaf(.sym, op.bytestr())
 		}
 		`#` {
 			return r.read_hash()
@@ -383,7 +483,7 @@ fn (mut r Reader) read_collection(tag DatumTag, close u8) ?NodeId {
 	for {
 		r.skip_ws()
 		if r.eof() {
-			r.fail('unclosed ' + tag.str() + ', expected byte 0x' + close.hex())
+			r.short('unclosed ' + tag.str() + ', expected byte 0x' + close.hex())
 			break
 		}
 		if r.peek() == close {
@@ -410,7 +510,7 @@ fn (mut r Reader) read_string() ?NodeId {
 	mut buf := []u8{cap: 32}
 	for {
 		if r.eof() {
-			r.fail('unterminated string')
+			r.short('unterminated string')
 			break
 		}
 		c := r.next()
@@ -449,7 +549,7 @@ fn (mut r Reader) read_bar_symbol() ?NodeId {
 		buf << r.next()
 	}
 	if r.eof() {
-		r.fail('unterminated |symbol|')
+		r.short('unterminated |symbol|')
 	} else {
 		r.next() // closing |
 	}
@@ -648,6 +748,96 @@ fn (mut r Reader) try_number(s string) ?NodeId {
 	return none
 }
 
+// Depth is how far into a form the REPL is, and whether a string is open.
+//
+// A second, independent scan rather than a mode on Reader, because the REPL needs
+// this before it decides to read: the buffer is re-parsed on every keystroke-line,
+// and the answer it wants -- "is anything still open?" -- has to be computable
+// without reading anything.
+//
+// `;` comments and `#| ... |#` blocks are skipped, and a `|`-delimited symbol is
+// NOT a string: `(a |x| b)` is balanced, while `(a "x` is not. Getting that
+// backwards makes the prompt lie about the one case a prompt exists for.
+pub struct Depth {
+pub mut:
+	n        int
+	in_string bool
+	in_comment bool
+}
+
+// depth scans `src` and reports how many brackets are still open.
+//
+// The obvious version counts `(`, `[` and `{` and forgets about strings, so
+// `(print "(")` looks unterminated forever and the REPL waits for a bracket the
+// user has no intention of typing. Byte iteration, not rune iteration: V iterates
+// a string as bytes, and a rune loop mangles every multi-byte character -- which
+// here would mean the offset arithmetic is wrong for any input containing one.
+pub fn depth(src string) Depth {
+	mut d := Depth{
+		n: 0
+	}
+	mut i := 0
+	for i < src.len {
+		c := src[i]
+		// A `#|` block comment, nested like the lexer reads it. Non-nested
+		// handling would still be right for all but commented-out blocks that
+		// contain their own terminator, which is vanishingly rare in a REPL
+		// buffer.
+		if c == hash_c && i + 1 < src.len && src[i + 1] == bar {
+			mut level := 1
+			i += 2
+			for i + 1 < src.len && level > 0 {
+				if src[i] == hash_c && src[i + 1] == bar {
+					level++
+					i += 2
+				} else if src[i] == bar && src[i + 1] == hash_c {
+					level--
+					i += 2
+				} else {
+					i++
+				}
+			}
+			continue
+		}
+		if c == semi {
+			for i < src.len && src[i] != nl {
+				i++
+			}
+			continue
+		}
+		if c == dquote {
+			i++
+			mut closed := false
+			for i < src.len {
+				if src[i] == backslash_bs {
+					i += 2
+					continue
+				}
+				if src[i] == dquote {
+					closed = true
+					i++
+					break
+				}
+				i++
+			}
+			if !closed {
+				d.in_string = true
+			}
+			continue
+		}
+		if c == lparen || c == lbrack || c == lbrace {
+			d.n++
+		} else if c == rparen || c == rbrack || c == rbrace {
+			if d.n > 0 {
+				d.n--
+			}
+		}
+		i++
+	}
+	d.in_comment = d.n > 0 || d.in_string
+	return d
+}
+
 // ------------------------------------------------------------------ entry
 
 pub struct ReadResult {
@@ -657,9 +847,30 @@ pub mut:
 	diags []Diagnostic
 }
 
-// read_all parses a whole source file into top-level forms.
-pub fn read_all(src string) ReadResult {
-	mut a := Arena{}
+// Forms is the result of reading into an arena someone else owns. It carries no
+// arena, because copying one would invalidate every NodeId in it.
+pub struct Forms {
+pub mut:
+	forms []NodeId
+	diags []Diagnostic
+}
+
+// read_forms parses `src` and appends every node it creates to this arena.
+//
+// This exists for one reason: a machine that evaluates a second file has to keep
+// the first file's nodes alive, because closures and continuation frames hold
+// NodeIds and nothing else. Reading into a fresh arena and swapping the machine's
+// pointer would leave every existing closure pointing at indices in the wrong
+// array -- silently, and only for code defined before the second read. Appending
+// to one arena costs the memory of every program the machine has ever run and is
+// correct by construction.
+//
+// It is a method rather than a free function taking `mut a &Arena` because that
+// spelling does not compile on V 0.5.2, and the alternative -- taking the arena by
+// value and trusting that V passes `mut` parameters by reference -- makes the
+// aliasing depend on a language rule, which is exactly the sort of thing this
+// project has been bitten by before.
+pub fn (mut a Arena) read_forms(src string) Forms {
 	mut r := Reader{
 		src:   src
 		arena: &a
@@ -675,9 +886,19 @@ pub fn read_all(src string) ReadResult {
 			break
 		}
 	}
-	return ReadResult{
-		arena: a
+	return Forms{
 		forms: forms
 		diags: r.diags
+	}
+}
+
+// read_all parses a whole source file into top-level forms, in a fresh arena.
+pub fn read_all(src string) ReadResult {
+	mut a := Arena{}
+	f := a.read_forms(src)
+	return ReadResult{
+		arena: a
+		forms: f.forms
+		diags: f.diags
 	}
 }

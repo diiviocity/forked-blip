@@ -1,6 +1,6 @@
-module vlip
+module blip
 
-// Value is the runtime representation of every vlip datum, plus the environment
+// Value is the runtime representation of every blip datum, plus the environment
 // and closure machinery the machine needs.
 //
 // Three V facts shaped this, all found by measurement rather than by reading the
@@ -25,7 +25,7 @@ import strconv
 
 @[flag]
 pub enum Tag {
-	nil // the empty value
+	nil // the empty value: absence of a result
 	boolean
 	integer
 	float
@@ -34,6 +34,7 @@ pub enum Tag {
 	symbol    // interned string
 	keyword   // interned string, self-evaluating, callable
 	pair
+	emptylist // the empty list: a sequence of length zero
 	vector
 	array     // mutable vector
 	table     // immutable map
@@ -41,6 +42,7 @@ pub enum Tag {
 	closure
 	primitive
 	continuation
+	struct_   // a struct instance; the constructor name is in the payload
 }
 
 // NodeId indexes the reader's flat arena. It lives here rather than in the
@@ -109,6 +111,56 @@ pub:
 	values map[string]Value
 }
 
+// StructVal is a struct instance. Fields are kept in DECLARATION order, not
+// sorted: `(Point 1 2)` has to print the way it was written, and a sorted map
+// prints `(Point 2 1)`. Table's `keys()` sorts because a table's order is not
+// anyone's business; a struct's field order is the declaration.
+pub struct StructVal {
+pub:
+	name   string
+	fields []string
+	values map[string]Value
+}
+
+pub fn (s &StructVal) payload_tag() Tag {
+	return .struct_
+}
+
+pub fn (s &StructVal) get(k string) Value {
+	if k in s.values {
+		return s.values[k]
+	}
+	return nil_value()
+}
+
+pub fn (s &StructVal) has(k string) bool {
+	return k in s.values
+}
+
+// at returns a field by its index in the declaration.
+pub fn (s &StructVal) at(i int) Value {
+	return s.values[s.fields[i]]
+}
+
+// update returns a copy with one field replaced. Structs are immutable, so
+// `p.y := 99` builds a new value and leaves the original alone -- which is the
+// whole reason the syntax exists instead of `set!`.
+pub fn (s &StructVal) with(k string, v Value) &StructVal {
+	mut mm := map[string]Value{}
+	for f in s.fields {
+		if f == k {
+			mm[f] = v
+		} else {
+			mm[f] = s.values[f]
+		}
+	}
+	return &StructVal{
+		name:   s.name
+		fields: s.fields
+		values: mm
+	}
+}
+
 pub fn (t &Table) payload_tag() Tag {
 	return t.tag
 }
@@ -135,6 +187,59 @@ pub fn (t &Table) has(k string) bool {
 	return k in t.values
 }
 
+// Mutators take `&Vector`/`&Table` and need `unsafe`, because a `&T` receiver is
+// immutable in V and these deliberately mutate the shared payload. They live here
+// rather than in prims because the struct is declared here, and prims cannot reach
+// through an immutable reference to a field of another module's struct.
+//
+// `mut v Vector` is NOT accepted as an alternative on V 0.5.2 for a receiver that
+// is only ever obtained from a `&Vector`: the checker rejects the pair of methods
+// with "use (mut v Vector) or (v &Vector) instead of (mut v &Vector)" and then
+// rejects the mutation itself. The `unsafe` is the shape that compiles.
+pub fn (v &Vector) set_at(i int, val Value) {
+	unsafe {
+		v.data[i] = val
+	}
+}
+
+pub fn (v &Vector) push(val Value) {
+	unsafe {
+		// `.clone()` and not a straight assignment: V treats `mut d := v.data` on an
+		// immutable receiver as aliasing, and rejects it. Cloning is CORRECT here
+		// rather than a copy that breaks sharing, because every accessor reads
+		// `v.data` again -- nothing else holds the old slice descriptor.
+		mut d := v.data.clone()
+		d << val
+		v.data = d
+	}
+}
+
+pub fn (v &Vector) pop() Value {
+	unsafe {
+		mut d := v.data.clone()
+		last := d[d.len - 1]
+		d = d[..d.len - 1]
+		v.data = d
+		return last
+	}
+}
+
+pub fn (t &Table) set_at(k string, val Value) {
+	unsafe {
+		mut m := t.values
+		m[k] = val
+		t.values = m
+	}
+}
+
+pub fn (t &Table) delete_at(k string) {
+	unsafe {
+		mut m := t.values
+		m.delete(k)
+		t.values = m
+	}
+}
+
 // Not `@[packed]`: packing forces byte alignment, which misaligns the pointer
 // inside the interface field and crashes. Natural alignment costs nothing here.
 @[direct_array_access]
@@ -151,6 +256,23 @@ pub mut:
 pub fn nil_value() Value {
 	return Value{
 		tag:     .nil
+		payload: no_payload
+	}
+}
+
+// empty_list is the empty list, which is NOT the nil value.
+//
+// The examples assert both `(get {:a 1} :missing) ;=> nil` and `(list) ;=> ()`,
+// so one value cannot print both ways. They are therefore two values, and
+// `null?` / `nil?` are true of both -- which is also what Clojure does, and it
+// is the only reading under which `nil` means "no result" while `(cdr '(1))`
+// still reads back as `()`.
+//
+// The alternative, printing nil as `()`, makes every absent lookup and every
+// missing argument indistinguishable from an empty sequence at a glance.
+pub fn empty_list() Value {
+	return Value{
+		tag:     .emptylist
 		payload: no_payload
 	}
 }
@@ -228,9 +350,14 @@ pub fn cons(car Value, cdr Value) Value {
 	}
 }
 
-// list_from builds a cons chain right to left.
+// list_from builds a cons chain right to left. An empty input gives the empty
+// list, not nil: `list_from` is how a cons chain's base case is built, so the
+// base case has to be a sequence.
 pub fn list_from(items []Value) Value {
-	mut out := nil_value()
+	if items.len == 0 {
+		return empty_list()
+	}
+	mut out := empty_list()
 	mut i := items.len - 1
 	for i >= 0 {
 		out = cons(items[i], out)
@@ -313,6 +440,23 @@ pub fn (v Value) as_table() &Table {
 	return v.payload as &Table
 }
 
+pub fn struct_value(name string, fields []string, vals map[string]Value) Value {
+	return Value{
+		tag: .struct_
+		payload: &StructVal{
+			name:   name
+			fields: fields
+			values: vals
+		}
+	}
+}
+
+@[inline]
+pub fn (v Value) as_struct() &StructVal {
+	assert v.tag == .struct_
+	return v.payload as &StructVal
+}
+
 // Only `#f` is false -- as in R5RS and Clojure. `0`, `""`, `nil`, `()` and
 // `(quote ())` are all true. Ruby and JavaScript say the opposite, which is why
 // everyone arriving from them has to relearn this.
@@ -324,6 +468,13 @@ pub fn (v Value) truthy() bool {
 @[inline]
 pub fn (v Value) is_nil() bool {
 	return v.tag == .nil
+}
+
+// is_empty_seq is what `null?` asks: true for the empty list AND for nil, because
+// both mean "no elements here", and the examples assert `(null? '())` is true.
+@[inline]
+pub fn (v Value) is_empty_seq() bool {
+	return v.tag == .nil || v.tag == .emptylist
 }
 
 // ---- environments ----------------------------------------------------------
@@ -407,6 +558,16 @@ pub fn (mut ea EnvArena) set(id EnvId, name string, val Value) bool {
 
 // ---- callables -------------------------------------------------------------
 
+// Closure carries `rest` as a flag rather than a magic parameter name.
+//
+// The obvious version binds the rest to a parameter literally called `rest` and
+// checks `params.last == 'rest'`. That makes `(define (f rest) ...)` -- a
+// perfectly ordinary function of one argument -- silently variadic, and it makes
+// the flag invisible in the parameter list, so a caller reading the signature
+// cannot tell arity from arity-at-least.
+//
+// A flag costs one bool and keeps both cases unambiguous: `(define (f a . r) r)`
+// is 1-or-more, `(define (f rest) rest)` is exactly 1.
 pub struct Closure {
 pub:
 	params []string
@@ -414,7 +575,25 @@ pub:
 	env    EnvId
 	name   string
 	arity  int
+	rest   bool
+	// rest_name is the name after the dot. It is kept out of `params` so that
+	// binding it cannot collide with an ordinary parameter, and out of `arity` so
+	// that arity counts only the FIXED parameters.
+	rest_name string
+	// Labelled parameters. `opt_from` is the index of the first one, or -1.
+	// The keyword names and defaults are parallel arrays from there on, and a
+	// default of `no_default` means the label is required.
+	//
+	// They are arena NodeIds rather than values because a default is evaluated at
+	// the CALL, in the caller's scope -- `(connect #:port (+ port 1))` has to see
+	// the caller's `port`. Baking the value into the closure at definition time
+	// would evaluate it once, in the definition's scope, and be wrong.
+	opt_from     int = -1
+	opt_names    []string
+	opt_defaults []NodeId
 }
+
+pub const no_default = NodeId(-2)
 
 pub fn (c &Closure) payload_tag() Tag {
 	return .closure
@@ -429,6 +608,41 @@ pub fn new_closure(params []string, body NodeId, env EnvId, name string) Value {
 			env:    env
 			name:   name
 			arity:  params.len
+		}
+	}
+}
+
+// new_rest_closure is the variadic constructor. `params` EXCLUDES the rest
+// name; the rest name is kept separately so binding it cannot collide with an
+// ordinary parameter.
+pub fn new_rest_closure(params []string, rest_name string, body NodeId, env EnvId, name string) Value {
+	return Value{
+		tag: .closure
+		payload: &Closure{
+			params:     params,
+			body:       body,
+			env:        env,
+			name:       name,
+			arity:      params.len,
+			rest:       true,
+			rest_name:  rest_name,
+		}
+	}
+}
+
+// labelled builds the closure for a parameter list that has labelled parameters.
+pub fn labelled(params []string, body NodeId, env EnvId, name string, opt_from int, opt_names []string, opt_defaults []NodeId) Value {
+	return Value{
+		tag: .closure
+		payload: &Closure{
+			params:      params
+			body:        body
+			env:         env
+			name:        name
+			arity:       params.len
+			opt_from:    opt_from
+			opt_names:   opt_names
+			opt_defaults: opt_defaults
 		}
 	}
 }
@@ -471,6 +685,13 @@ pub enum KontTag {
 	set_k
 	and_k
 	or_k
+	field_k // p.y := value, building the new instance
+	assert_k // (assert test message)
+	use_k // binding the values of an ok Result
+	match_k // choosing a match clause
+	guard_k // evaluating a #:when guard
+	collect_k // evaluating the elements of a vector, table or array literal
+	try_k // `try`: running one body form, or its #:finally
 }
 
 pub struct Kont {
@@ -482,6 +703,14 @@ pub mut:
 	rest NodeId // the enclosing form
 	acc  []Value
 	name string
+	// match_k and guard_k carry a clause list and an ordered binding list, which
+	// is more state than the index/name fields hold. They live here rather than in
+	// a second frame type because Kont is ONE struct on purpose: V 0.5.2 cannot
+	// initialise a sum-type variant field from a local, so continuations cannot be
+	// a sum type at all. See the note above the type.
+	clauses []NodeId
+	binds   []string
+	vals    []Value
 }
 
 // ---- misc ------------------------------------------------------------------
@@ -491,4 +720,33 @@ pub mut:
 // rejected rather than silently yielding 12.
 pub const strict_float = strconv.AtoF64Param{
 	allow_extra_chars: false
+}
+
+pub fn format_error(path string, src string, line int, col int, msg string, length int) string {
+	if line <= 0 {
+		return 'error: ${msg}'
+	}
+	lines := src.split('\n')
+	if line > lines.len {
+		return 'error: ${msg}'
+	}
+	mut src_line := lines[line - 1]
+	max_src := 200
+	if src_line.len > max_src {
+		src_line = src_line[..max_src] + '...'
+	}
+	ln := line.str()
+	gutter := ' '.repeat(ln.len)
+	mut out := 'error: ${msg}\n'
+	out += '  --> ${path}:${line}:${col}\n'
+	out += '${gutter} |\n'
+	out += '${ln} | ${src_line}\n'
+	out += '${gutter} | '
+	underline_col := col - 1
+	if underline_col > 0 {
+		out += ' '.repeat(underline_col)
+	}
+	out += '^'.repeat(length)
+	out += '\n'
+	return out
 }
