@@ -29,7 +29,7 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -129,7 +129,7 @@ jobs:
   # `docker build` is not run on every push: an image is a promise about a
   # published artifact, so it builds when the source that defines one changes.
   docker-images:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
