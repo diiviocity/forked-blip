@@ -44,7 +44,7 @@ ARG V_COMMIT=0137eb5d8ebc5d183259309ed08ea06ba9bc27d6
 # "reject `if` conditions that start with a parenthesized if expression" on
 # 2026-10-05, and vlib/math/bits/bits.v at this V_COMMIT uses that shape at
 # line 621. This is the vc snapshot taken just after V_COMMIT.
-ARG VC_COMMIT=64b1017fe300
+ARG VC_COMMIT=64b1017fe300e1631d5b2ecd4d38092bba1802fd
 
 WORKDIR /opt
 # V's own build runs git to stamp the version, and a container's repository has

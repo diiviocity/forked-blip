@@ -35,7 +35,7 @@ ARG V_COMMIT=0137eb5d8ebc5d183259309ed08ea06ba9bc27d6
 # This is the vc snapshot taken just after V_COMMIT and before that change. The
 # `v` target is built directly rather than through `all`, because `all` depends
 # on download_vc, which clones vc at HEAD and undoes the pin.
-ARG VC_COMMIT=64b1017fe300
+ARG VC_COMMIT=64b1017fe300e1631d5b2ecd4d38092bba1802fd
 
 WORKDIR /opt
 RUN git config --global --add safe.directory /opt/v \
