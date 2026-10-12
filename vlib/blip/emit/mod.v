@@ -687,22 +687,21 @@ fn (mut e Emitter) application(id reader.NodeId, kids []reader.NodeId) string {
 
 // quoted renders a quoted form as the literal it names.
 fn (mut e Emitter) quoted(id reader.NodeId) string {
-	d := e.node(id)
-	// The reader gives `'x` the same node as `x` with a quoting wrapper around
-	// it in some builds and not in others; handle both by checking whether the
-	// datum itself is the quoted thing.
-	if d.tag == .vector {
-		kids := e.kids(id)
-		mut parts := []string{}
-		for k in kids {
-			parts << e.value(k)
-		}
-		return '[${parts.join(', ')}]'
+	// A `.quoted` datum is a WRAPPER: it holds the quoted form as its child and
+	// carries nothing else. Its own tag therefore says nothing about what is
+	// inside, so this used to inspect the wrapper -- matched neither branch for
+	// `'done` -- and fall through to `e.value(id)`, re-entering `value` on the
+	// same datum until the depth guard returned `null`. That is where the `null`
+	// in `(if (= n 0) 'done ...)` came from.
+	//
+	// Unwrapping to the child and rendering it as DATA fixes all three shapes at
+	// once: a symbol, a vector, and a list. The list case is the one that
+	// matters most -- `(quote (1 2 3))` is three elements, not a call to `1`.
+	kids := e.kids(id)
+	if kids.len == 0 {
+		return '[]'
 	}
-	if d.tag == .list {
-		return e.application(id, e.kids(id))
-	}
-	return e.value(id)
+	return e.data(kids[0])
 }
 
 // data renders a QUOTED form, where every element is data rather than code.
@@ -725,9 +724,11 @@ fn (mut e Emitter) data(id reader.NodeId) string {
 			return '[${parts.join(', ')}]'
 		}
 		.sym {
-			// A symbol is its own name. The printer shows it bare where a string
-			// carries quotes, and that distinction is what `(quote a)` means.
-			return '"${escape_all(d.value)}"'
+			// A symbol is its own name, and the blip printer shows it BARE where
+			// a string carries quotes. Emitting a plain string here made
+			// `(quote done)` print as `"done"` on node and `done` on blip, so it
+			// is tagged and printed bare.
+			return 'blip.sym(${json_str(d.value)})'
 		}
 		.vector {
 			kids := e.kids(id)
@@ -909,4 +910,9 @@ fn escape_all(s string) string {
 		sb << escape(ch)
 	}
 	return sb.join('')
+}
+
+// json_str wraps escape_all in the quotes the emitted JavaScript needs.
+fn json_str(s string) string {
+	return '"${escape_all(s)}"'
 }

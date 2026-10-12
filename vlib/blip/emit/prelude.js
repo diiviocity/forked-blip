@@ -44,6 +44,9 @@ const blip = {
   // emitted program disagree with `blip run` on the value the numeric tower
   // exists to keep exact.
   rat: (n, d) => ({ blip_rat: [n, d] }),
+  // A symbol is tagged so the printer can show it bare, the way `blip run`
+  // does. Emitting one as a plain string printed `done` as `"done"`.
+  sym: (name) => ({ blip_sym: name }),
 };
 
 // blip_show is the printer. It is separate from console.log because blip prints
@@ -53,6 +56,8 @@ function blip_show(x) {
   if (x === null || x === undefined) return "null";
   // A rational prints as n/d, the way the blip printer prints one.
   if (x && x.blip_rat) return x.blip_rat[0] + "/" + x.blip_rat[1];
+  // A symbol prints bare: `done`, not `"done"` and not `'"done"'`.
+  if (x && x.blip_sym !== undefined) return x.blip_sym;
   if (typeof x === "string") return "\"" + x + "\"";
   if (Array.isArray(x)) return "(" + x.map(blip_show).join(" ") + ")";
   return String(x);
