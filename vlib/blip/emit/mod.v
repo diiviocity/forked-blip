@@ -33,8 +33,10 @@ pub fn compile(src string) !Result {
 		return error('${d.line}:${d.col}: ${d.msg}')
 	}
 	mut e := Emitter{
-		arena: res.arena
-		top:   map[string]bool{}
+		arena:    res.arena
+		top:      map[string]bool{}
+		mangled:  map[string]string{}
+		collided: map[string]string{}
 	}
 	// Two passes, because a function may refer to a name defined later in the
 	// file -- ordinary in blip, impossible in a `const` declaration.
@@ -133,6 +135,11 @@ mut:
 	depth   int
 	top     map[string]bool
 	blocked []string
+	// mangled maps a MANGLED JavaScript identifier back to the blip name that
+	// claimed it. collided records the names that lost, so a real collision is
+	// reported rather than silently resolved to whichever definition came first.
+	mangled  map[string]string
+	collided map[string]string
 }
 
 // ------------------------------------------------------------------ helpers
@@ -323,9 +330,15 @@ fn (mut e Emitter) named_function(name string, params []reader.NodeId, body []re
 			e.refuse('non-symbol parameter')
 			return
 		}
-		ps << d.value
+		ps << e.mangle_name(d.value)
 	}
-	head := if name == '' { '' } else { ' ' + name }
+	// The NAME goes through the same mangling as every other identifier, here
+	// rather than at each call site, so a definition and a call cannot disagree.
+	// Without this, `count-down` was defined with its hyphen while every call
+	// was mangled -- a ReferenceError, and a worse one than a visible difference
+	// because the emitted file looks plausible.
+	js_name := e.mangle_name(name)
+	head := if js_name == '' { '' } else { ' ' + js_name }
 	e.emit('function${head}(${ps.join(', ')}) {')
 	e.depth++
 	for i, b in body {
@@ -376,7 +389,7 @@ fn (mut e Emitter) emit_let(kids []reader.NodeId) {
 			e.refuse('let binding')
 			return
 		}
-		names << e.node(inner[0]).value
+		names << e.mangle_name(e.node(inner[0]).value)
 		vals << e.value(inner[1])
 	}
 	body := kids[2..]
@@ -499,7 +512,7 @@ fn (mut e Emitter) expression_form(name string, kids []reader.NodeId) ?string {
 				e.refuse('let binding')
 				return 'null'
 			}
-			names << e.node(inner[0]).value
+			names << e.mangle_name(e.node(inner[0]).value)
 			vals << e.value(inner[1])
 		}
 		last := e.value(kids.last())
@@ -613,14 +626,13 @@ fn (mut e Emitter) callable(name string) string {
 	if name in prim_names {
 		return 'blip.${mangle(name)}'
 	}
-	if name.contains('-') || name.contains('?') || name.contains('!') {
-		// Not a JS identifier, so it cannot be emitted as one. It is reached
-		// through the runtime's symbol table, which is the only honest option:
-		// inventing a mangling rule here would have to stay stable forever.
-		e.refuse("symbol '${name}'")
-		return 'blip.missing'
-	}
-	return name
+	// A hyphenated, question-marked or bang-ed name is not a JavaScript
+	// identifier, so it is mangled with the same rule `symbol` uses -- one rule,
+	// in one place, so a definition and a call always agree. Refusing it here
+	// used to throw away every name in 01_basics.lip that was not a bare word:
+	// count-down, even?, odd?, not-tail and via-cond, five of the eight forms
+	// the emitter reported for that file.
+	return e.mangle_name(name)
 }
 
 fn kids_of(e &Emitter, id reader.NodeId) []reader.NodeId {
@@ -696,6 +708,22 @@ fn (mut e Emitter) stmt(id reader.NodeId) {
 	e.form(id)
 }
 
+// symbol names how a blip symbol reaches JavaScript.
+//
+// A hyphenated, question-marked or bang-ed name is not a JavaScript identifier,
+// so it used to be refused -- which threw away most of any real program:
+// `count-down`, `even?`, `odd?`, `not-tail` and `via-cond` are five of the
+// refusals `examples/01_basics.lip` produces before reaching anything else.
+//
+// It is now MANGLED instead, and mangled in exactly one place so a definition
+// and a use of the same name always agree. The mapping is `-` to `_`, `?` to
+// `_q`, `!` to `_b` -- the same rule `mangle` applies to primitives, so a name
+// like `string-upcase` lands on one spelling whichever path emits it.
+//
+// The mapping is not injective: `a-b` and `a_b` mangle to the same identifier.
+// That is a real limitation and it is not papered over here; it is why the
+// collisions field exists, so a program that trips it is reported rather than
+// silently compiled to the wrong thing.
 fn (mut e Emitter) symbol(s string) string {
 	if s == 'nil' {
 		return 'null'
@@ -703,13 +731,41 @@ fn (mut e Emitter) symbol(s string) string {
 	if s in ['#t', '#f'] {
 		return if s == '#t' { 'true' } else { 'false' }
 	}
-	if s.contains('-') || s.contains('?') || s.contains('!') {
-		// Not a JS identifier. The emitter refuses rather than inventing a
-		// mangling rule that would have to stay stable forever.
-		e.refuse("symbol '${s}'")
+	if s == '_' {
 		return 'undefined'
 	}
-	return s
+	// A primitive used as a VALUE -- `(fold + 0 xs)` -- has to reach the runtime
+	// too, not only in callee position. `+` as a bare symbol is not a JavaScript
+	// expression, so this is the same routing `callable` does.
+	if s in prim_names {
+		return 'blip.${mangle(s)}'
+	}
+	return e.mangle_name(s)
+}
+
+// mangle_name is the single place a blip identifier becomes a JavaScript one.
+//
+// Keeping it in one function is what makes a definition and a use of the same
+// name always agree: `named_function`, `emit_define` and `symbol` all come here,
+// so `count-down` cannot be defined one way and called another.
+fn (mut e Emitter) mangle_name(s string) string {
+	if !needs_mangle(s) {
+		return s
+	}
+	out := s.replace('-', '_').replace('?', '_q').replace('!', '_b')
+	// A first mapping wins. If this identifier was already claimed by a
+	// DIFFERENT blip name, the program has a genuine collision, and it is
+	// recorded rather than silently compiled to whichever came first.
+	prev := e.mangled[out]
+	if prev != '' && prev != s {
+		e.collided[s] = out
+	}
+	e.mangled[out] = s
+	return out
+}
+
+fn needs_mangle(s string) bool {
+	return s.contains('-') || s.contains('?') || s.contains('!')
 }
 
 // ------------------------------------------------------------------ text
