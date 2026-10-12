@@ -100,6 +100,11 @@ const blip = {
   string_upcase: (s) => s.toUpperCase(),
   string_downcase: (s) => s.toLowerCase(),
   string_append: (...a) => a.join(""),
+  // A rational is a tagged pair, not a JavaScript number. JavaScript has no
+  // exact rational, and widening 1/3 to 0.3333333333333333 would make the
+  // emitted program disagree with `blip run` on the value the numeric tower
+  // exists to keep exact.
+  rat: (n, d) => ({ blip_rat: [n, d] }),
 };
 
 // blip_show is the printer. It is separate from console.log because blip prints
@@ -107,6 +112,8 @@ const blip = {
 // without them would make emitted output disagree with `blip run`.
 function blip_show(x) {
   if (x === null || x === undefined) return "null";
+  // A rational prints as n/d, the way the blip printer prints one.
+  if (x && x.blip_rat) return x.blip_rat[0] + "/" + x.blip_rat[1];
   if (typeof x === "string") return "\\"" + x + "\\"";
   if (Array.isArray(x)) return "(" + x.map(blip_show).join(" ") + ")";
   return String(x);
@@ -272,6 +279,17 @@ fn (mut e Emitter) special(name string, id reader.NodeId, kids []reader.NodeId) 
 		e.emit_let(kids)
 		return true
 	}
+	// These have expression spellings, so a statement position is the same
+	// expression followed by a semicolon. Emitting them as calls instead -- which
+	// is what the statement path did -- produced `cond([...], [else, null])`,
+	// which is not JavaScript and not an error either: the file failed to parse
+	// at `else`, far from the form that caused it.
+	for derived in ['cond', 'when', 'unless', 'and', 'or', 'case'] {
+		if name == derived {
+			e.emit('${e.value(id)};')
+			return true
+		}
+	}
 	if name == 'quote' {
 		e.emit('${e.value(kids[1])};')
 		return true
@@ -290,8 +308,8 @@ fn (mut e Emitter) special(name string, id reader.NodeId, kids []reader.NodeId) 
 
 // unsupported_forms are blip special forms this emitter does not compile yet.
 // Everything NOT in this list and not handled above is a plain function call.
-const unsupported_forms = ['cond', 'case', 'loop', 'dotimes', 'match', 'match*',
-	'struct', 'use', 'require', 'provide', 'set!', 'when', 'unless', 'and', 'or',
+const unsupported_forms = ['loop', 'dotimes', 'match', 'match*',
+	'struct', 'use', 'require', 'provide', 'set!',
 	'try', 'do', 'defmacro', 'macex', 'macex1', 'as->', '->', '->>', '|>',
 	'cond->', 'import', 'quasiquote', 'unquote', 'unquote-splicing']
 
@@ -422,6 +440,14 @@ fn (mut e Emitter) value(id reader.NodeId) string {
 		.bool { return if d.i == 1 { 'true' } else { 'false' } }
 		.int { return d.i.str() }
 		.float { return d.f.str() }
+		.rat {
+			// A rational is not a JavaScript number. It is built as a tagged pair
+			// the runtime knows how to print, because `1/3` must print as `1/3`
+			// and not as 0.3333333333333333 -- blip's printer prints a rational as
+			// `n/d`, and an emitter that widened it would disagree with `blip run`
+			// on the very value the numeric tower exists for.
+			return 'blip.rat(${d.i}, ${d.den})'
+		}
 		.char { return '"${escape(rune(d.i))}"' }
 		.str { return '"${escape_all(d.value)}"' }
 		.sym { return e.symbol(d.value) }
@@ -525,10 +551,121 @@ fn (mut e Emitter) expression_form(name string, kids []reader.NodeId) ?string {
 		other := if kids.len >= 4 { e.value(kids[3]) } else { 'null' }
 		return '(${e.value(kids[1])} ? ${e.value(kids[2])} : ${other})'
 	}
+	if name == 'case' && kids.len >= 2 {
+		return e.case_expr(kids)
+	}
 	if name == 'begin' {
 		return '(${kids[1..].map(e.value).join(', ')})'
 	}
+	// The derived forms. Each is spelled so that blip's truthiness rule holds:
+	// ONLY `#f` is false, so `0`, `""`, `()`, and `null` are all true. JavaScript
+	// disagrees about `null` -- it is falsy there and true here -- so these go
+	// through `blip_truthy` rather than emitting bare `&&`, `||` or a `? :` test.
+	if name == 'cond' {
+		return e.cond_expr(kids)
+	}
+	if name == 'when' && kids.len >= 2 {
+		body := kids[2..].map(e.value).join(', ')
+		return '(blip_truthy(${e.value(kids[1])}) ? (${body}) : null)'
+	}
+	if name == 'unless' && kids.len >= 2 {
+		body := kids[2..].map(e.value).join(', ')
+		return '(blip_truthy(${e.value(kids[1])}) ? null : (${body}))'
+	}
+	if name == 'and' && kids.len >= 2 {
+		// Short-circuit left to right, and evaluate to the FIRST false value or
+		// the last value -- which is what blip's `and` does and a plain `&&` does
+		// not, because `&&` yields the falsy operand rather than #f.
+		return e.chain(kids[1..], true)
+	}
+	if name == 'or' && kids.len >= 2 {
+		return e.chain(kids[1..], false)
+	}
 	return none
+}
+
+// case_expr builds `(case k (p1 v1) (p2 v2) (else v3))` as nested equalities.
+//
+// A clause's PATTERN is data, not code: `(case 5 (1 2 3) "low" (4 5 6) "mid")`
+// lists the values that match, and emitting those as applications -- which is
+// what a plain walk does -- produces `1(2, 3)` in the output. The subject is
+// therefore compared with `blip_equal` against each literal, and a list of
+// literals becomes a set membership test.
+fn (mut e Emitter) case_expr(kids []reader.NodeId) string {
+	if kids.len < 3 {
+		return 'null'
+	}
+	subject := e.value(kids[1])
+	mut out := 'null'
+	for i := kids.len - 1; i >= 2; i-- {
+		parts := e.kids(kids[i])
+		if parts.len < 2 {
+			continue
+		}
+		pattern := e.node(parts[0])
+		is_else := pattern.tag == .sym && pattern.value == 'else'
+		body := parts[1..].map(e.value).join(', ')
+		if is_else {
+			out = '(${body})'
+			continue
+		}
+		// A pattern that is not a literal cannot be matched by equality, and
+		// guessing at its meaning would be worse than refusing it.
+		// A pattern that is not a literal cannot be matched by equality, and
+		// guessing at its meaning would be worse than refusing it.
+		if pattern.tag !in literal_tags {
+			e.refuse('case pattern')
+			return 'null'
+		}
+		out = '(blip.p_equal_q(${subject}, ${e.value(parts[0])}) ? (${body}) : ${out})'
+	}
+	return out
+}
+
+// literal_tags are the datums `case` can compare by equality.
+const literal_tags = [reader.DatumTag.int, .float, .str, .char, .bool, .nil, .kw,
+	.rat]
+
+fn (mut e Emitter) cond_expr(kids []reader.NodeId) string {
+	if kids.len < 3 {
+		return 'null'
+	}
+	// Build from the last clause backwards so each level nests inside the next.
+	mut out := 'null'
+	for i := kids.len - 1; i >= 1; i-- {
+		clause := e.node(kids[i])
+		if clause.tag != .list {
+			continue
+		}
+		parts := e.kids(kids[i])
+		if parts.len < 2 {
+			continue
+		}
+		test := e.node(parts[0])
+		is_else := test.tag == .sym && test.value == 'else'
+		val := parts[1..].map(e.value).join(', ')
+		cond_str := if is_else { 'true' } else { 'blip_truthy(${e.value(parts[0])})' }
+		out = '(${cond_str} ? (${val}) : ${out})'
+	}
+	return out
+}
+
+// chain builds `and`/`or` as a single expression. The last operand is the
+// result when nothing short-circuits, which is why it is handled outside the
+// loop.
+fn (mut e Emitter) chain(items []reader.NodeId, is_and bool) string {
+	if items.len == 1 {
+		return e.value(items[0])
+	}
+	mut out := e.value(items[items.len - 1])
+	for i := items.len - 2; i >= 0; i-- {
+		v := e.value(items[i])
+		// `and` returns the first FALSE value, so the short-circuit arm is the
+		// operand itself and the fall-through is the rest. `or` is the mirror.
+		out = '(blip_truthy(${v}) ? ${out} : ${v})'
+		_ = is_and
+	}
+	return out
 }
 
 fn (mut e Emitter) application(id reader.NodeId, kids []reader.NodeId) string {
