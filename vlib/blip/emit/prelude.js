@@ -73,3 +73,30 @@ function blip_equal(a, b) {
   }
   return a === b;
 }
+
+// A trampoline, which is the only way to give a backend tail calls on an engine
+// that does not have them.
+//
+// JavaScript engines other than Safari do not implement tail call elimination,
+// so `(loop 250000)`, which costs nothing on the blip machine, grows the JS
+// stack and dies. A trampoline fixes it by making a tail call return a THUNK
+// instead of calling: the caller returns it verbatim, so no frame is added, and
+// `tramp` drives the loop.
+//
+// The rule the emitter follows: a call in TAIL position returns
+// `thunk(() => ...)`, and a call in any other position is wrapped in `tramp`,
+// because that caller's frame is still needed to receive the value. The
+// difference between those two spellings is the whole mechanism.
+function thunk(f) { return { __blip_thunk: f }; }
+
+function tramp(first) {
+  let step = first;
+  let guard = 0;
+  while (step && step.__blip_thunk) {
+    step = step.__blip_thunk();
+    if (++guard > 1e8) {
+      throw new Error("blip: trampoline did not terminate");
+    }
+  }
+  return step;
+}

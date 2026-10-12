@@ -82,9 +82,19 @@ mut:
 	depth   int
 	top     map[string]bool
 	blocked []string
-	// mangled maps a MANGLED JavaScript identifier back to the blip name that
-	// claimed it. collided records the names that lost, so a real collision is
-	// reported rather than silently resolved to whichever definition came first.
+	// tail is how deep inside a TAIL position of a function body the emitter is
+	// currently standing. Zero means an ordinary position, where a call has to
+	// be driven, because the caller's frame is still needed to receive the value.
+	// Positive means the value produced IS the function's own value, so a call
+	// there may return a thunk and let the trampoline take the frame away.
+	//
+	// It has to be threaded explicitly rather than inferred, because the same
+	// expression sits in a different position depending on where it appears: the
+	// last form of a body is in tail position and the first is not. A test, an
+	// argument, and a short-circuited operand are all NOT, and each of those is
+	// a place where a tail call would hand the frame to a caller that is not
+	// looping, so the flag is cleared at each one rather than left inherited.
+	tail     int
 	mangled  map[string]string
 	collided map[string]string
 }
@@ -299,9 +309,13 @@ fn (mut e Emitter) named_function(name string, params []reader.NodeId, body []re
 	head := if js_name == '' { '' } else { ' ' + js_name }
 	e.emit('function${head}(${ps.join(', ')}) {')
 	e.depth++
+	// The LAST body form is the function's value, so it is in tail position and
+	// everything before it is not. That is the whole rule.
 	for i, b in body {
 		if i == body.len - 1 {
+			e.tail++
 			e.emit('return ${e.value(b)};')
+			e.tail--
 		} else {
 			e.stmt(b)
 		}
@@ -488,8 +502,26 @@ fn (mut e Emitter) expression_form(name string, kids []reader.NodeId) ?string {
 		if kids.len < 3 {
 			return none
 		}
-		other := if kids.len >= 4 { e.value(kids[3]) } else { 'null' }
-		return '(${e.value(kids[1])} ? ${e.value(kids[2])} : ${other})'
+		// The TEST is evaluated in ordinary position -- its value is discarded,
+		// not returned -- while each BRANCH produces the `if`'s value. So the
+		// branches inherit tail position and the test does not, or a call in a
+		// test would be allowed to hand the frame away.
+		saved := e.tail
+		e.tail = 0
+		cond := e.value(kids[1])
+		e.tail = saved
+		e.tail++
+		then := e.value(kids[2])
+		e.tail--
+		other := if kids.len >= 4 {
+			e.tail++
+			v := e.value(kids[3])
+			e.tail--
+			v
+		} else {
+			'null'
+		}
+		return '(${cond} ? ${then} : ${other})'
 	}
 	if name == 'case' && kids.len >= 2 {
 		return e.case_expr(kids)
@@ -633,11 +665,24 @@ fn (mut e Emitter) application(id reader.NodeId, kids []reader.NodeId) string {
 		}
 	}
 	callee := if head.tag == .sym { e.callable(head.value) } else { e.value(kids[0]) }
+	// An argument's value is CONSUMED by the call, so it is never in tail
+	// position -- not even when the call itself is. Leaving the flag inherited
+	// here would let `(f (g x))` return a thunk from `g`'s frame into `f`'s
+	// argument list, which is a value, not a call.
+	saved_tail := e.tail
+	e.tail = 0
 	mut parts := []string{}
 	for a in kids[1..] {
 		parts << e.value(a)
 	}
-	return '${callee}(${parts.join(', ')})'
+	e.tail = saved_tail
+	// A call in tail position returns a thunk; any other call is DRIVEN. That
+	// single choice is what stands between a backend that can loop a million
+	// times and one that dies on the first thousand.
+	if e.tail > 0 {
+		return 'thunk(() => ${callee}(${parts.join(', ')}))'
+	}
+	return 'tramp(${callee}(${parts.join(', ')}))'
 }
 
 // quoted renders a quoted form as the literal it names.
