@@ -226,7 +226,7 @@ fn (mut e Emitter) special(name string, id reader.NodeId, kids []reader.NodeId) 
 		return true
 	}
 	if name == 'let' || name == 'let*' || name == 'letrec' {
-		e.emit_let(kids)
+		e.emit_let(name, kids)
 		return true
 	}
 	// These have expression spellings, so a statement position is the same
@@ -281,6 +281,33 @@ fn (mut e Emitter) special(name string, id reader.NodeId, kids []reader.NodeId) 
 			return true
 		}
 		e.refuse('dotimes')
+		return true
+	}
+	// `loop` is a real loop, not a call, so it becomes a real JavaScript loop.
+	//
+	// The increment rule is READ OUT OF THE MACHINE rather than guessed:
+	// `transform_loop` appends `(set! name (+ name 1))` after the body and then
+	// tail-calls, and it wraps the whole thing in `(if test body nil)` so the
+	// TEST IS CHECKED FIRST. That is why `(loop i 0 (< i 5) (set! s (+ s i)))`
+	// sums 0+1+2+3+4, and why `(loop i 0 #f 7)` returns nil without ever running
+	// a body. Neither is visible from the form's surface, and a guessed `for`
+	// would get both wrong.
+	if name == 'loop' {
+		name_d := e.node(kids[1])
+		if kids.len >= 4 && name_d.tag == .sym {
+			var_name := e.mangle_name(name_d.value)
+			e.emit('let ${var_name} = ${e.value(kids[2])};')
+			e.emit('while (blip_truthy(${e.value(kids[3])})) {')
+			e.depth++
+			for b in kids[4..] {
+				e.stmt(b)
+			}
+			e.emit('${var_name} = blip.add(${var_name}, 1);')
+			e.depth--
+			e.emit('}')
+			return true
+		}
+		e.refuse('loop')
 		return true
 	}
 	// A form this emitter knows about but does not yet handle is refused by
@@ -386,30 +413,89 @@ fn (mut e Emitter) emit_if(kids []reader.NodeId) {
 }
 
 // put_back is the inverse of the parameter split, restored by named_function.
-fn (mut e Emitter) emit_let(kids []reader.NodeId) {
-	// A let becomes an IIFE: each binding is a parameter, the body is the call.
-	// That is what `let` means anyway -- a lambda applied -- and it keeps the
-	// bindings out of scope when the block ends, which is the property the
-	// blip suites check for.
+fn (mut e Emitter) emit_let(kind string, kids []reader.NodeId) {
+	// The three spellings are NOT the same thing, and treating them as one is why
+	// `(let* ([a 1] [b (+ a 1)]) b)` came out as `((a, b) => ...)(1, a + 1)` --
+	// a ReferenceError where blip answers 2.
+	//
+	//   let     all values evaluated in the OUTER scope; the bindings are simultaneous
+	//   let*    each value sees the bindings before it
+	//   letrec  every binding visible to every other, so mutual recursion works
+	//
+	// `let` keeps the IIFE, which is a lambda applied and is exactly right. The
+	// other two become plain declarations, which is the only shape where a later
+	// value can see an earlier name.
 	if kids.len < 3 {
 		e.refuse('let')
 		return
 	}
 	bindings := e.kids(kids[1])
-	mut names := []string{}
-	mut vals := []string{}
-	for b in bindings {
-		inner := e.kids(b)
-		if inner.len < 2 || e.node(inner[0]).tag != .sym {
-			e.refuse('let binding')
-			return
-		}
-		names << e.mangle_name(e.node(inner[0]).value)
-		vals << e.value(inner[1])
-	}
 	body := kids[2..]
-	e.emit('((${names.join(', ')}) => {')
+	if kind == 'let' {
+		mut names := []string{}
+		mut vals := []string{}
+		for b in bindings {
+			inner := e.kids(b)
+			if inner.len < 2 || e.node(inner[0]).tag != .sym {
+				e.refuse('let binding')
+				return
+			}
+			names << e.mangle_name(e.node(inner[0]).value)
+			vals << e.value(inner[1])
+		}
+		e.emit('((${names.join(', ')}) => {')
+		e.depth++
+		for i, b in body {
+			if i == body.len - 1 {
+				e.emit('return ${e.value(b)};')
+			} else {
+				e.stmt(b)
+			}
+		}
+		e.depth--
+		e.emit('})(${vals.join(', ')});')
+		return
+	}
+	// Wrapped in an IIFE, which is what keeps the bindings local. Emitting bare
+	// `let a = 1; ... return b;` puts a `return` at whatever depth the enclosing
+	// function allows -- top level, that is a SyntaxError and the whole file fails
+	// to parse, far from the form that caused it. The IIFE costs nothing and is
+	// the same shape `let` uses.
+	e.emit('(() => {')
 	e.depth++
+	// `letrec` declares every name BEFORE any of them has a value, so a binding
+	// can refer to one that comes after it -- which is the whole point of the
+	// form: `(letrec ([even? (lambda (n) ... (odd? ...))] [odd? ...]) ...)`.
+	// Emitting `let even_q = ...` first makes `odd_q` a ReferenceError the first
+	// time the closure runs, not when it is defined, so the error surfaces far
+	// from the cause.
+	if kind == 'letrec' {
+		mut names := []string{}
+		for b in bindings {
+			inner := e.kids(b)
+			if inner.len < 2 || e.node(inner[0]).tag != .sym {
+				e.refuse('let binding')
+				return
+			}
+			names << e.mangle_name(e.node(inner[0]).value)
+		}
+		e.emit('let ${names.join(', ')};')
+		for i, b in bindings {
+			inner := e.kids(b)
+			e.emit('${names[i]} = ${e.value(inner[1])};')
+		}
+	} else {
+		for b in bindings {
+			inner := e.kids(b)
+			if inner.len < 2 || e.node(inner[0]).tag != .sym {
+				e.refuse('let binding')
+				return
+			}
+			nm := e.mangle_name(e.node(inner[0]).value)
+			val := e.value(inner[1])
+			e.emit('let ${nm} = ${val};')
+		}
+	}
 	for i, b in body {
 		if i == body.len - 1 {
 			e.emit('return ${e.value(b)};')
@@ -418,7 +504,7 @@ fn (mut e Emitter) emit_let(kids []reader.NodeId) {
 		}
 	}
 	e.depth--
-	e.emit('})(${vals.join(', ')})')
+	e.emit('})();')
 }
 
 // ------------------------------------------------------------------ values
@@ -587,13 +673,22 @@ fn (mut e Emitter) expression_form(name string, kids []reader.NodeId) ?string {
 		body := kids[2..].map(e.value).join(', ')
 		return '(blip_truthy(${e.value(kids[1])}) ? null : (${body}))'
 	}
-	if name == 'and' && kids.len >= 2 {
+	// `and` and `or` with no arguments are the identities -- `#t` and `#f` -- not
+	// calls. The `kids.len >= 2` guard these used to have let `(or)` through as
+	// `or()`, a ReferenceError to a function that does not exist.
+	if name == 'and' {
+		if kids.len < 2 {
+			return 'true'
+		}
 		// Short-circuit left to right, and evaluate to the FIRST false value or
 		// the last value -- which is what blip's `and` does and a plain `&&` does
 		// not, because `&&` yields the falsy operand rather than #f.
 		return e.chain(kids[1..], true)
 	}
-	if name == 'or' && kids.len >= 2 {
+	if name == 'or' {
+		if kids.len < 2 {
+			return 'false'
+		}
 		return e.chain(kids[1..], false)
 	}
 	return none
