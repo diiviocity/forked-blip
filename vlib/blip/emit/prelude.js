@@ -47,6 +47,21 @@ const blip = {
   // A symbol is tagged so the printer can show it bare, the way `blip run`
   // does. Emitting one as a plain string printed `done` as `"done"`.
   sym: (name) => ({ blip_sym: name }),
+  // Higher-order forms. Each drives its callback through `tramp`, because a
+  // user function emitted by this backend returns a thunk when its body ends in
+  // a tail call -- and most of them do. Using the thunk directly would hand it
+  // to `blip.mul` instead of the value, and the failure would appear wherever the
+  // result was first used rather than at the call.
+  //
+  // `map` and `filter` preserve the container, which is the rule blip settled:
+  // `(map f [1 2 3])` is `[1 4 9]`, a vector, not a list.
+  map: (f, coll) => Array.isArray(coll) ? coll.map((x) => tramp(f(x))) : coll,
+  filter: (f, coll) => Array.isArray(coll)
+    ? coll.filter((x) => blip_truthy(tramp(f(x))))
+    : coll,
+  fold: (f, init, coll) => Array.isArray(coll)
+    ? coll.reduce((acc, x) => tramp(f(acc, x)), init)
+    : init,
 };
 
 // blip_show is the printer. It is separate from console.log because blip prints

@@ -946,6 +946,14 @@ fn mangle(name string) string {
 		'string-upcase' { return 'string_upcase' }
 		'string-downcase' { return 'string_downcase' }
 		'string-append' { return 'string_append' }
+		// The higher-order forms. Without these the default mangling produced
+		// `blip.p_map`, a name the runtime does not define, so `map` was routed
+		// somewhere that looks plausible and is not there.
+		'map' { return 'map' }
+		'filter' { return 'filter' }
+		'fold' { return 'fold' }
+		'for-each' { return 'for_each' }
+		'vector-map' { return 'vector_map' }
 		else {
 			return 'p_' + name.replace('-', '_').replace('?', '_q').replace('!', '_b')
 		}
@@ -980,6 +988,11 @@ const prim_names = {
 	'string-downcase': true
 	'string-append':  true
 	'vector-length':  true
+	'map':            true
+	'filter':         true
+	'fold':           true
+	'for-each':       true
+	'vector-map':     true
 }
 
 // stmt emits a form as a statement, and drops a trailing `;` when the form is
