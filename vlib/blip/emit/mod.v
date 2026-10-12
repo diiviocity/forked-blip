@@ -310,6 +310,18 @@ fn (mut e Emitter) special(name string, id reader.NodeId, kids []reader.NodeId) 
 		e.refuse('loop')
 		return true
 	}
+	// `(struct Point (x y))` defines a constructor, a predicate and one accessor
+	// per field -- which is what `eval_struct` generates on the blip side
+	// (vlib/blip/machine/mod.v). Emitting the constructor as a plain function is
+	// enough for `(Point 3 4)` to work, because a constructor call is an ordinary
+	// application and needs no new spelling.
+	//
+	// The accessor names are gone through the SAME mangling as every other
+	// identifier, so `point-x` becomes `point_x` here and at every call site.
+	if name == 'struct' || name == 'struct-out' {
+		e.emit_struct(kids)
+		return true
+	}
 	// A form this emitter knows about but does not yet handle is refused by
 	// name, so the user is told rather than handed something that does not work.
 	if name in unsupported_forms {
@@ -505,6 +517,45 @@ fn (mut e Emitter) emit_let(kind string, kids []reader.NodeId) {
 	}
 	e.depth--
 	e.emit('})();')
+}
+
+// emit_struct emits the constructor, predicate and accessors for a struct
+// declaration, mirroring what `eval_struct` generates in the machine.
+fn (mut e Emitter) emit_struct(kids []reader.NodeId) {
+	if kids.len < 3 {
+		e.refuse('struct')
+		return
+	}
+	name_d := e.node(kids[1])
+	if name_d.tag != .sym {
+		e.refuse('struct')
+		return
+	}
+	name := name_d.value
+	fields := e.kids(kids[2])
+	mut field_names := []string{}
+	for f in fields {
+		fd := e.node(f)
+		if fd.tag != .sym {
+			e.refuse('struct field')
+			return
+		}
+		field_names << fd.value
+	}
+	low := name.to_lower()
+	// The constructor. It is a plain function, so `(Point 3 4)` is an ordinary
+	// application and needs no special case at the call site.
+	e.emit('function ${e.mangle_name(name)}(${field_names.map(e.mangle_name).join(', ')}) {')
+	e.depth++
+	e.emit('return { blip_struct: "${name}", ${field_names.map(e.mangle_name).join(', ')} };')
+	e.depth--
+	e.emit('}')
+	// The predicate and the accessors, mangled with the same rule every other
+	// identifier uses, so `point?` is `point_q` here and wherever it is called.
+	e.emit('function ${e.mangle_name('${low}?')}(v) { return !!v && v.blip_struct === "${name}"; }')
+	for f in field_names {
+		e.emit('function ${e.mangle_name('${low}-${f}')}(v) { return v.${e.mangle_name(f)}; }')
+	}
 }
 
 // ------------------------------------------------------------------ values

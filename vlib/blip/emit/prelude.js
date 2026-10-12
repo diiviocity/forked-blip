@@ -79,8 +79,18 @@ function blip_show(x) {
   if (x && x.blip_rat) return x.blip_rat[0] + "/" + x.blip_rat[1];
   // A symbol prints bare: `done`, not `"done"` and not `'"done"'`.
   if (x && x.blip_sym !== undefined) return x.blip_sym;
+  // A struct prints the way `blip run` prints one: (Name field field ...).
+  if (x && x.blip_struct !== undefined) {
+    const vals = Object.keys(x)
+      .filter((k) => k !== "blip_struct")
+      .map((k) => blip_show(x[k]));
+    return "(" + x.blip_struct + " " + vals.join(" ") + ")";
+  }
   if (typeof x === "string") return "\"" + x + "\"";
   if (Array.isArray(x)) return "(" + x.map(blip_show).join(" ") + ")";
+  // A boolean prints `#t` or `#f`, the way the blip printer spells it.
+  if (x === true) return "#t";
+  if (x === false) return "#f";
   return String(x);
 }
 
