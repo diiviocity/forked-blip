@@ -244,6 +244,45 @@ fn (mut e Emitter) special(name string, id reader.NodeId, kids []reader.NodeId) 
 		e.emit('${e.value(kids[1])};')
 		return true
 	}
+	// `set!` is a JavaScript assignment, which is what it means. It has to be
+	// handled here rather than left to the call path, because the call path would
+	// emit `set(x, v)` -- a call to a function that does not exist, which is the
+	// same silent-green shape the backend gate exists to catch.
+	if name == 'set!' {
+		if kids.len == 3 {
+			target := e.node(kids[1])
+			if target.tag == .sym {
+				e.emit('${e.mangle_name(target.value)} = ${e.value(kids[2])};')
+				return true
+			}
+		}
+		e.refuse('set!')
+		return true
+	}
+	// `dotimes` is a real loop, not a recursive call, so it becomes a real
+	// JavaScript loop. `i` runs 0 to n-1 inclusive, which is what
+	// `(dotimes i 5 (set! s (+ s i)))` summing to 0+1+2+3+4 = 10 asserts.
+	//
+	// The name and the count are SEPARATE arguments -- `(dotimes i 5 body...)`,
+	// the same shape `loop` uses, not a binding list. Reading them as a binding
+	// list gives no children for the symbol `i` and the guard below refuses.
+	if name == 'dotimes' {
+		name_d := e.node(kids[1])
+		if kids.len >= 4 && name_d.tag == .sym {
+			var_name := e.mangle_name(name_d.value)
+			bound := e.value(kids[2])
+			e.emit('for (let ${var_name} = 0; blip_truthy(blip.lt(${var_name}, ${bound})); ${var_name} = blip.add(${var_name}, 1)) {')
+			e.depth++
+			for b in kids[3..] {
+				e.stmt(b)
+			}
+			e.depth--
+			e.emit('}')
+			return true
+		}
+		e.refuse('dotimes')
+		return true
+	}
 	// A form this emitter knows about but does not yet handle is refused by
 	// name, so the user is told rather than handed something that does not work.
 	if name in unsupported_forms {
@@ -258,8 +297,8 @@ fn (mut e Emitter) special(name string, id reader.NodeId, kids []reader.NodeId) 
 
 // unsupported_forms are blip special forms this emitter does not compile yet.
 // Everything NOT in this list and not handled above is a plain function call.
-const unsupported_forms = ['loop', 'dotimes', 'match', 'match*',
-	'struct', 'use', 'require', 'provide', 'set!',
+	const unsupported_forms = ['loop', 'dotimes', 'match', 'match*',
+	'struct', 'use', 'require', 'provide',
 	'try', 'do', 'defmacro', 'macex', 'macex1', 'as->', '->', '->>', '|>',
 	'cond->', 'import', 'quasiquote', 'unquote', 'unquote-splicing']
 
@@ -281,7 +320,11 @@ fn (mut e Emitter) emit_define(kids []reader.NodeId) {
 		return
 	}
 	if sig.tag == .sym {
-		e.emit('const ${sig.value} = ${e.value(kids[2])};')
+		// `let`, not `const`. `(define s 0)` followed by `(set! s ...)` is
+		// ordinary blip, and JavaScript throws on an assignment to a `const`.
+		// The mangling matches every other use of the name, so a definition and a
+		// `set!` cannot disagree.
+		e.emit('let ${e.mangle_name(sig.value)} = ${e.value(kids[2])};')
 		return
 	}
 	e.refuse('define')
