@@ -137,6 +137,36 @@ mut:
 
 // ------------------------------------------------------------------ helpers
 
+// max_depth bounds how deep the emitter will recurse into an AST before it
+// refuses the program.
+//
+// Without a bound, a real example -- `examples/01_basics.lip`, 153 lines --
+// overflows the native stack and dies with `V panic: stack overflow`, exit code
+// 0xC00000FD. That is unrecoverable: no error is returned, nothing is explained,
+// and the caller gets a dead process. A limit turns the same program into a
+// refusal that names the problem, which is the only failure this emitter is
+// allowed to have.
+//
+// The number is generous for real source -- ordinary code nests tens deep, not
+// thousands -- and small enough that hitting it means a genuine pathology rather
+// than a deep expression. If a legitimate program ever hits it, the answer is an
+// explicit stack, not a larger number.
+const max_depth = 600
+
+fn (mut e Emitter) enter() ! {
+	e.depth++
+	if e.depth > max_depth {
+		e.depth--
+		return error('expression nests deeper than ${max_depth}; the emitter refuses it rather than overflowing the stack')
+	}
+}
+
+fn (mut e Emitter) leave() {
+	if e.depth > 0 {
+		e.depth--
+	}
+}
+
 fn (mut e Emitter) kids(id reader.NodeId) []reader.NodeId {
 	return e.arena.kids(id)
 }
@@ -366,6 +396,13 @@ fn (mut e Emitter) emit_let(kids []reader.NodeId) {
 // ------------------------------------------------------------------ values
 
 fn (mut e Emitter) value(id reader.NodeId) string {
+	e.enter() or {
+		e.refuse('too deeply nested')
+		return 'null'
+	}
+	defer {
+		e.leave()
+	}
 	d := e.node(id)
 	match d.tag {
 		.nil { return 'null' }
