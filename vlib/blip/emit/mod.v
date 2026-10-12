@@ -624,8 +624,27 @@ fn (mut e Emitter) case_expr(kids []reader.NodeId) string {
 			out = '(${body})'
 			continue
 		}
-		// A pattern that is not a literal cannot be matched by equality, and
-		// guessing at its meaning would be worse than refusing it.
+		// A pattern that is a LIST is "any of these", not "equal to this list":
+		// `(case 5 [(1 2 3) 'low'] [(4 5 6) 'mid'])` matches on 5 because it is
+		// in the first group. Emitting the group as a value would compare 5 to
+		// `[1, 2, 3]` and never match.
+		if pattern.tag == .list {
+			alts := e.kids(parts[0])
+			if alts.len == 0 {
+				continue
+			}
+			mut tests := []string{}
+			for a in alts {
+				ad := e.node(a)
+				if ad.tag !in literal_tags {
+					e.refuse('case pattern')
+					return 'null'
+				}
+				tests << 'blip.p_equal_q(${subject}, ${e.value(a)})'
+			}
+			out = '((${tests.join(' || ')}) ? (${body}) : ${out})'
+			continue
+		}
 		// A pattern that is not a literal cannot be matched by equality, and
 		// guessing at its meaning would be worse than refusing it.
 		if pattern.tag !in literal_tags {
