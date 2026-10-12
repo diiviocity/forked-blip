@@ -1,4 +1,4 @@
-# vlip build artifacts
+# blip build artifacts
 *.exe
 *.dll
 *.so
@@ -11,7 +11,7 @@
 *.vgen
 *.vtmp
 
-# NOT ignored: vlib/vlip/ holds the vlip implementation itself.
+# NOT ignored: vlib/blip/ holds the blip implementation itself.
 # Only V's own generated vlib/ (dependencies fetched by `v`) is excluded.
 
 # Editor
@@ -35,3 +35,7 @@ dist/
 # Installed packages: recorded in blip.lock, restored by `blip pkg install`.
 blip_modules/
 
+
+# V's per-build cache directories. The compiler drops these beside the binary
+# it produces; they are build state, not source.
+*.v3cc*/
