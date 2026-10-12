@@ -949,6 +949,8 @@ fn mangle(name string) string {
 		// The higher-order forms. Without these the default mangling produced
 		// `blip.p_map`, a name the runtime does not define, so `map` was routed
 		// somewhere that looks plausible and is not there.
+		'even?' { return 'even_q' }
+		'odd?' { return 'odd_q' }
 		'map' { return 'map' }
 		'filter' { return 'filter' }
 		'fold' { return 'fold' }
@@ -988,6 +990,8 @@ const prim_names = {
 	'string-downcase': true
 	'string-append':  true
 	'vector-length':  true
+	'even?':          true
+	'odd?':           true
 	'map':            true
 	'filter':         true
 	'fold':           true

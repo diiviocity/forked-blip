@@ -62,6 +62,12 @@ const blip = {
   fold: (f, init, coll) => Array.isArray(coll)
     ? coll.reduce((acc, x) => tramp(f(acc, x)), init)
     : init,
+  // `even?` and `odd?` are primitives in blip (prims/mod.v). They are not the
+  // `letrec` bindings in examples/01_basics.lip -- those shadow them locally,
+  // and the top-level `(filter even? ...)` uses the primitive. An emitter with
+  // no binding for them emits a call to a name nobody defined.
+  even_q: (n) => n % 2 === 0,
+  odd_q: (n) => n % 2 !== 0,
 };
 
 // blip_show is the printer. It is separate from console.log because blip prints
