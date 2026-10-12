@@ -494,6 +494,16 @@ fn (mut e Emitter) application(id reader.NodeId, kids []reader.NodeId) string {
 		if inner := e.expression_form(head.value, kids) {
 			return inner
 		}
+		// A known-but-unsupported form in expression position must be REFUSED,
+		// not emitted as a call. `cond`, `match`, `loop` and `struct` all fell
+		// through to `cond(...)` here -- which is not valid JavaScript and not
+		// an error either -- so the emitter reported success and produced a
+		// program that ran and printed nothing. That is the worst failure mode
+		// available: a green run that means nothing.
+		if head.value in unsupported_forms {
+			e.refuse(head.value)
+			return 'null'
+		}
 	}
 	callee := if head.tag == .sym { e.callable(head.value) } else { e.value(kids[0]) }
 	mut parts := []string{}

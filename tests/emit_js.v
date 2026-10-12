@@ -53,16 +53,26 @@ fn blip_output(src string) string {
 	return h.transcript().trim_right('\n')
 }
 
-// node_output runs the emitted JavaScript.
+// node_output runs the emitted JavaScript and returns what it printed.
+//
+// Node's output goes to a FILE and is read back, rather than captured from the
+// child: capturing the output of a program that prints thousands of lines
+// overflowed this test's stack, and the emitter plus the runner in one process
+// is a stack depth the compiler did not accept.
 fn node_output(js string) string {
 	os.mkdir_all('tmp') or {}
-	path := 'tmp/emit_check.js'
-	os.write_file(path, js) or { return 'ERROR: cannot write ${path}' }
-	r := os.exec(['node', path])
-	if r.exit_code != 0 {
-		return 'ERROR: node exited ${r.exit_code}: ${r.output}'
+	js_path := 'tmp/emit_check.js'
+	os.write_file(js_path, js) or { return 'ERROR: cannot write ${js_path}' }
+	os.rm('tmp/emit_check.out') or {}
+	out_path := os.join_path(os.getwd(), 'tmp', 'emit_check.out')
+	shelled := os.system('node "${js_path}" > "${out_path}" 2>&1')
+	if shelled != 0 {
+		got := os.read_file(out_path) or { '' }
+		return 'ERROR: node exited ${shelled}: ${got.limit(200)}'
 	}
-	return r.output.trim_right('\n')
+	got := os.read_file(out_path) or { return 'ERROR: cannot read ${out_path}' }
+	os.rm(out_path) or {}
+	return got.trim_right('\n')
 }
 
 // check emits the source, runs both engines on it, and compares.
@@ -117,9 +127,65 @@ fn main() {
 
 	s.check('a lambda applied', '(print ((fn [x] (* x x)) 7))')
 
+	s.real_programs()
+
 	if s.fails > 0 {
 		println('${s.checks} checks, ${s.fails} FAILURE(S)')
 		return
 	}
 	println('emit-js: all ${s.checks} checks passed')
+}
+
+// ---- the real bar ---------------------------------------------------------
+
+// The eleven checks above are small and pass. Every real example failed them
+// anyway, and did so SILENTLY: the emitter reported "clean" for five of the six
+// examples while the JavaScript ran and printed nothing. A green run that means
+// nothing is the worst failure mode a backend has, so the honest measure is not
+// the tiny programs -- it is an actual program, end to end.
+//
+// Each example is emitted and the emitted JavaScript is run. A program the
+// backend cannot handle yet must be REFUSED by name; a program it accepts must
+// produce output. Either outcome is a real result. The one that is not allowed
+// is acceptance with no output, which is what this used to do.
+fn (mut s Suite) real_programs() {
+	examples := ['01_basics', '02_data', '03_match', '04_errors', '05_pipelines',
+		'06_modules']
+	mut silent := []string{}
+	mut refused := []string{}
+	mut running := []string{}
+	for ex in examples {
+		path := 'examples/${ex}.lip'
+		src := os.read_file(path) or {
+			continue
+		}
+		res := emit.compile(src) or {
+			refused << '${ex}: ${err.msg()}'
+			continue
+		}
+		if res.blocked.len > 0 {
+			refused << '${ex}: ${res.blocked.join(', ')}'
+			continue
+		}
+		out := node_output(res.js)
+		if out.starts_with('ERROR') || out.trim_space() == '' {
+			// Accepted and produced nothing usable: the failure this whole
+			// check exists to catch.
+			silent << '${ex}: ${out.trim_space().limit(90)}'
+			continue
+		}
+		running << ex
+	}
+	s.checks++
+	println('info examples the backend runs: ${running.join(' ')}')
+	println('info examples refused by name: ${refused.len} -> ${refused.join(' | ')}')
+	if silent.len == 0 {
+		println('ok   no example is accepted silently => ${running.len} run, ${refused.len} refused')
+		return
+	}
+	println('FAIL examples accepted with no output')
+	for line in silent {
+		println('     ${line}')
+	}
+	s.fails++
 }
