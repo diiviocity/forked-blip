@@ -95,6 +95,7 @@ mut:
 	// a place where a tail call would hand the frame to a caller that is not
 	// looping, so the flag is cleared at each one rather than left inherited.
 	tail     int
+	gensym   int
 	mangled  map[string]string
 	collided map[string]string
 }
@@ -724,7 +725,17 @@ fn (mut e Emitter) expression_form(name string, kids []reader.NodeId) ?string {
 		body := kids[2..].map(e.value).join(', ')
 		return '(blip_truthy(${e.value(kids[1])}) ? null : (${body}))'
 	}
-	// `and` and `or` with no arguments are the identities -- `#t` and `#f` -- not
+	// `match` for the patterns that are unambiguous: a literal, `_`, or a bare
+	// symbol (which BINDS rather than compares -- `(match 5 [x 'bound])` gives
+	// `bound` with x = 5).
+	//
+	// Everything else -- vectors, tables, struct patterns, `(cons a b)`,
+	// predicate patterns -- is refused by name, because guessing at their
+	// meaning is worse than reporting the gap. `match*` is refused wholesale: it
+	// matches several subjects at once, which is a different shape entirely.
+	if name == 'match' {
+		return e.match_expr(kids)
+	}
 	// calls. The `kids.len >= 2` guard these used to have let `(or)` through as
 	// `or()`, a ReferenceError to a function that does not exist.
 	if name == 'and' {
@@ -802,9 +813,85 @@ fn (mut e Emitter) case_expr(kids []reader.NodeId) string {
 	return out
 }
 
-// literal_tags are the datums `case` can compare by equality.
+// literal_tags are the datums case and match can compare by equality.
 const literal_tags = [reader.DatumTag.int, .float, .str, .char, .bool, .nil, .kw,
 	.rat]
+
+// match_expr builds `(match subject [pattern result] ...)` as nested tests.
+//
+// A bare symbol in a pattern is a BINDING, not a comparison -- that is the one
+// rule that surprises everyone, and it is why `(match 5 [x 'bound])` answers
+// `bound` rather than falling through. `_` matches anything without binding.
+fn (mut e Emitter) match_expr(kids []reader.NodeId) string {
+	if kids.len < 3 {
+		e.refuse('match')
+		return 'null'
+	}
+	subject := e.value(kids[1])
+	e.gensym++
+	// A fresh name for the subject, so a binding pattern can shadow it without
+	// the body seeing the original. The counter is local to this emitter because
+	// there is no arena here to name things in.
+	subj := '__blip_subject${e.gensym}'
+	e.emit('let ${subj} = ${subject};')
+	mut out := 'null'
+	for i := kids.len - 1; i >= 2; i-- {
+		parts := e.kids(kids[i])
+		if parts.len < 2 {
+			continue
+		}
+		pattern := e.node(parts[0])
+		// `#:when guard` sits between the pattern and the result.
+		mut ri := 1
+		mut guard := ''
+		if parts.len >= 3 {
+			kw := e.node(parts[1])
+			if kw.tag == .kw && kw.value == '#:when' {
+				guard = e.value(parts[2])
+				ri = 3
+			}
+		}
+		if ri >= parts.len {
+			continue
+		}
+		body := parts[ri..].map(e.value).join(', ')
+
+		// `_` matches anything; `else` is the fallback. The test is a literal
+		// `true`, which needs no helper -- an earlier version emitted
+		// `blip_truthy_true()`, a function I put in the V emitter instead of the
+		// JavaScript runtime, so the generated file referenced a name that
+		// existed nowhere.
+		if pattern.tag == .sym && (pattern.value == '_' || pattern.value == 'else') {
+			out = '(true ? (${body}) : ${out})'
+			continue
+		}
+		// A literal pattern is an equality test.
+		if pattern.tag in literal_tags {
+			test := 'blip.p_equal_q(${subj}, ${e.value(parts[0])})'
+			out = e.guarded(test, guard, body, out)
+			continue
+		}
+		// A bare symbol binds the subject to that name and always matches.
+		if pattern.tag == .sym {
+			bind := e.mangle_name(pattern.value)
+			e.emit('let ${bind} = ${subj};')
+			out = e.guarded('true', guard, body, out)
+			continue
+		}
+		// A list or vector pattern means destructuring, which is not emitted yet.
+		e.refuse('match pattern')
+		return 'null'
+	}
+	return '((${out}))'
+}
+
+// guarded wraps a match clause body in its `#:when` guard when it has one.
+fn (mut e Emitter) guarded(test string, guard string, body string, fallback string) string {
+	if guard == '' {
+		return '(${test} ? (${body}) : ${fallback})'
+	}
+	return '(${test} && blip_truthy(${guard}) ? (${body}) : ${fallback})'
+}
 
 fn (mut e Emitter) cond_expr(kids []reader.NodeId) string {
 	if kids.len < 3 {

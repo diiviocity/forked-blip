@@ -74,7 +74,9 @@ const blip = {
 // a string WITH its quotes, the way the blip printer does -- printing one without
 // them would make emitted output disagree with `blip run`.
 function blip_show(x) {
-  if (x === null || x === undefined) return "null";
+  // `null`/`undefined` is blip's `nil`, and the printer spells it `nil`. Returning
+  // `null` here made `(match 7 [1 'one])` print `null` where blip prints `nil`.
+  if (x === null || x === undefined) return "nil";
   // A rational prints as n/d, the way the blip printer prints one.
   if (x && x.blip_rat) return x.blip_rat[0] + "/" + x.blip_rat[1];
   // A symbol prints bare: `done`, not `"done"` and not `'"done"'`.
