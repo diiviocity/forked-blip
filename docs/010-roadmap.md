@@ -195,6 +195,27 @@ site whose examples do not run is the most common way a language project dies.
 12. WASM backend, with `blip build` and a client-side playground as its
     proof; `fmt`/`vet`/`doc` as their dependencies land.
 
+### 6.1 The plan
+
+Section 6 is the order; this is the same order as trackable phases. Each phase
+names its gate -- the command or suite that says it is done. No phase is marked
+done here; gates are.
+
+| Phase | Goal | Gate |
+|---|---|---|
+| P0 naming | one name everywhere | `blip` in `v.mod`, `vlib/blip/`, `blip.v`, every import |
+| P1 embedding core | no panics; `Host`, `run_str`, multi-source `use` | new V tests proving each, plus `tests/embedding.v` |
+| P2 REPL | persistent machine, multiline input, `,l`/`,r`, golden tests | `tests/repl_golden.v` with zero `FAIL` |
+| P3 language | `match`, `match*`, structs, modules; six examples run | `tests/examples_run.v` markers, `tests/binding_forms.v` |
+| P4 proof programs | brainfuck, then json | `tests/programs_run.v` markers |
+| P5 website, direction 1 | blip calls veb; generated, deployed, every sample run by CI | pages deploy with no dead links or placeholder text |
+| P6 tooling | `version`, `help`, `run`, `test`, `lsp`, `new` | each section-9 subcommand exercised; `tools/genprims.vsh --check` green |
+| P7 editor | diagnostics-first server, then grammar/client/snippets | stdio-driven fixtures agreeing with `blip run` (§8.3) |
+| P8 veb calls blip, then WASM | green continuations behind an adapter; `blip build` emitting `.wasm` | client-side playground as proof |
+
+Rule for advancing: the gate runs green before the next phase starts, and the
+phase's section in this document is updated in the same commit.
+
 ## 7. Periodic work
 
 Nothing in this section is a deliverable. All of it is upkeep, and all of it is
