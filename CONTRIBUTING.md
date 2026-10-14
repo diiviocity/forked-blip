@@ -60,9 +60,38 @@ v -cc gcc -o reader_probe.exe reader_probe.v
 .\reader_probe.exe examples\*.lip
 ```
 
-All nine suites must print no `FAIL` line and the reader probe must report zero
+All eleven suites must print no `FAIL` line and the reader probe must report zero
 diagnostics. The runners do not set a non-zero exit code yet, which is why CI
 greps for `FAIL`.
+
+The eleven are: `tail_calls`, `non_tail`, `loop_forms`, `binding_forms`,
+`embedding`, `repl_golden`, `examples_run`, `programs_run`, `genprims`, `unit`,
+`emit_js`, `lsp`. (`CONTRIBUTING.md` said nine for a while after two were
+already in CI, which is the kind of drift this line exists to stop.)
+
+### The C-stage flake: `src.c:...: unterminated #ifndef`
+
+A build occasionally dies with
+
+```
+C compiler output from the default V compiler:
+src.c:1280: error: unterminated #ifndef
+  1280 | #ifndef RAND_MAX
+V compilation failed (c_compilation_error); retrying with a fallback
+compiler ...
+```
+
+This is **not** a bug in blip's source, and the fallback errors that follow are
+noise — the fallback mis-reads the same code. Re-run the build: it succeeds
+without any change. It was observed five times in one session, twice in a row
+from the same command, and 0 times in six consecutive runs afterwards.
+
+What is known: it happens in the C stage, before the fallback, and the same
+command always succeeds on a re-run. What is not known: the trigger. It is
+recorded here rather than chased, because a flake that cannot be reproduced on
+demand cannot be fixed, only worked around, and a workaround for an unknown
+trigger is a guess. If it ever reproduces reliably, that is the time to read the
+generated `src.c` around the reported line.
 
 ## Adding to the interpreter
 
