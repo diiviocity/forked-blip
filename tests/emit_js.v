@@ -92,6 +92,21 @@ fn (mut s Suite) check(label string, src string) {
 	s.eq('${label} matches', node, blip)
 }
 
+// check_example is the real bar for one example, and the one the batch above
+// cannot set by itself: emit the file, run it on node, run the SAME source on
+// the blip machine, and require the two transcripts to be identical. The
+// difference is the thing being tested -- an example that prints the right
+// shape with the wrong values would pass a golden-output check and fail this.
+fn (mut s Suite) check_example(name string) {
+	path := 'examples/${name}.lip'
+	src := os.read_file(path) or {
+		s.fails++
+		println('FAIL ${name} => cannot read ${path}')
+		return
+	}
+	s.check('${name} output matches the interpreter', src)
+}
+
 fn main() {
 	mut s := Suite{}
 
@@ -142,6 +157,13 @@ fn main() {
 	// outer thread. Without this the inner head emits as a call to a mangled
 	// name that exists nowhere.
 	s.check('nested pipes splice into the outer thread', '(print (-> (quote (9)) (->> (quote (1)) (car))))')
+
+	// 02_data is the first example the backend reproduces byte for byte: same
+	// collections, same containers, same sorted-key table spelling, same
+	// keyword-as-lookup rule. It is the only example checked this way, and the
+	// count in `no example is accepted silently` below is what says the others
+	// have not caught up.
+	s.check_example('02_data')
 
 	s.real_programs()
 

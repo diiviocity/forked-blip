@@ -196,15 +196,18 @@ fn (mut e Emitter) form(id reader.NodeId) {
 			return
 		}
 	}
-	// The callee goes through the same mapping an expression does, so a blip
-	// primitive reaches the runtime whether it is in statement or expression
-	// position. `print(x);` as a bare JavaScript call is a ReferenceError.
-	callee := if head.tag == .sym { e.callable(head.value) } else { e.value(kids[0]) }
-	mut parts := []string{}
-	for a in kids[1..] {
-		parts << e.value(a)
-	}
-	e.emit('${callee}(${parts.join(', ')});')
+	// The whole call is emitted by `application`, which is the one place that
+	// knows how a callee reaches JavaScript. It used to be spelled out here a
+	// second time, and the second copy drifted: a keyword in call position --
+	// `(:a {:a 1})`, the collection-as-lookup rule the data example is built
+	// around -- went through `value` on the keyword and emitted `"a"(table)`, a
+	// call to a string. Two copies of one rule is how the second one rots, so
+	// there is one now.
+	saved_tail := e.tail
+	e.tail = 0
+	call := e.application(id, kids)
+	e.tail = saved_tail
+	e.emit('${call};')
 }
 
 fn (mut e Emitter) special(name string, id reader.NodeId, kids []reader.NodeId) bool {
@@ -599,7 +602,8 @@ fn (mut e Emitter) value(id reader.NodeId) string {
 		.kw { return '"${escape_all(d.value)}"' }
 		.list {
 			return e.application(id, kids_of(e, id))
-		}		.vector {
+		}
+		.vector {
 			kids := e.kids(id)
 			mut parts := []string{}
 			for k in kids {
@@ -608,6 +612,15 @@ fn (mut e Emitter) value(id reader.NodeId) string {
 			// A vector is not an array: `[1 2 3]` prints `[1 2 3]` where a list
 			// prints `(1 2 3)`, so it is tagged and the printer reads the tag.
 			return 'blip.vec(${parts.join(', ')})'
+		}
+		.table {
+			return e.collection(id, d.tag)
+		}
+		.array {
+			return e.collection(id, d.tag)
+		}
+		.buffer {
+			return e.collection(id, d.tag)
 		}
 		.quoted {
 			// `'(1 2 3)` is a list literal. A quoted symbol is just its name,
@@ -905,6 +918,41 @@ fn (mut e Emitter) match_expr(kids []reader.NodeId) string {
 	return '((${out}))'
 }
 
+// collection emits the three non-list literal forms: `{:a 1}`, `@(1 2 3)` and
+// `@{:n 0}`. A table and a buffer both take keyword/value PAIRS, so their
+// children alternate, while an array takes plain values -- and blip prints an
+// array as `[1 2 3]`, which is the VECTOR spelling, so an array literal is
+// emitted as a vector and needs no shape of its own.
+//
+// That last part is measured, not deduced: `(def a @(1 2 3)) (print a)` prints
+// `[1 2 3]` on blip, so emitting `@(1 2 3)` as a tagged array would have made
+// every array in a program disagree with `blip run`.
+fn (mut e Emitter) collection(id reader.NodeId, kind reader.DatumTag) string {
+	kids := e.kids(id)
+	mut parts := []string{}
+	mut i := 0
+	for k in kids {
+		if kind == .table || kind == .buffer {
+			// A key: a keyword prints as its bare name in a table literal.
+			d := e.node(k)
+			if i % 2 == 0 && d.tag == .kw {
+				parts << json_str(d.value)
+				i++
+				continue
+			}
+		}
+		parts << e.value(k)
+		i++
+	}
+	if kind == .buffer {
+		return 'blip.buffer(${parts.join(', ')})'
+	}
+	if kind == .table {
+		return 'blip.table(${parts.join(', ')})'
+	}
+	return 'blip.vec(${parts.join(', ')})'
+}
+
 // thread_expr builds `(-> x steps...)` / `(->> x steps...)`.
 //
 // A step that is a FORM is `(f a b)` and the threaded value goes first or last
@@ -1036,6 +1084,17 @@ fn (mut e Emitter) application(id reader.NodeId, kids []reader.NodeId) string {
 		return '[]'
 	}
 	head := e.node(kids[0])
+	// A keyword in call position is a lookup, not a call: `(:a {:a 1})` is the
+	// same thing as `(get {:a 1} :a)`, shorter. The example states this as the
+	// rule that deletes the most noise, and emitting `"a"(...)` -- a call to a
+	// string -- is what happens when it is missed.
+	if head.tag == .kw {
+		if kids.len < 2 {
+			e.refuse('keyword call')
+			return 'null'
+		}
+		return 'blip.get(${e.value(kids[1])}, "${escape_all(head.value)}")'
+	}
 	if head.tag == .sym {
 		// A special form used where a value is required -- `(print (if x 1 2))`,
 		// `(print (let ([a 1]) a))` -- has to be emitted as an expression. The
@@ -1129,6 +1188,14 @@ fn (mut e Emitter) data(id reader.NodeId) string {
 			}
 			return 'blip.vec(${parts.join(', ')})'
 		}
+		.kw {
+			// A keyword in quoted data is a keyword, not a string: the blip
+			// printer writes `:three` where `"three"` is five characters and a
+			// different value. Falling through to `value` here is what made
+			// `(print '(1 "two" :three))` disagree between node and blip on the
+			// third element alone.
+			return 'blip.kw(${json_str(d.value)})'
+		}
 		else {
 			return e.value(id)
 		}
@@ -1195,6 +1262,57 @@ fn mangle(name string) string {
 		'sort' { return 'sort' }
 		'string-length' { return 'string_length' }
 		'vector-rev' { return 'reverse' }
+		// The collection forms. Without these a call fell through to the default
+		// mangling (`blip.p_table_keys`), a name the runtime does not define.
+		'table' { return 'table' }
+		'buffer' { return 'buffer' }
+		'get' { return 'get' }
+		'table-keys' { return 'table_keys' }
+		'list' { return 'list' }
+		// `append` concatenates sequences into a LIST (prim_append ends in
+		// `blip.list_from`), so `(append [1] [2 3])` is `(1 2 3)`, not a vector.
+		'append' { return 'append' }
+		// The 02_data batch. Each comment names the rule, because a runtime
+		// function with no stated contract is a guess the next reader inherits.
+		'array-length' { return 'array_length' }
+		'array-ref' { return 'array_ref' }
+		'put' { return 'put' }
+		'remove' { return 'remove' }
+		'string-split' { return 'string_split' }
+		'string-trim' { return 'string_trim' }
+		'string-index-of' { return 'string_index_of' }
+		'vector-append' { return 'vector_append' }
+		'array-push!' { return 'array_push_b' }
+		'array-set!' { return 'array_set_b' }
+		'put!' { return 'put_b' }
+		'take' { return 'take' }
+		// The type predicates. Each maps to the tag check its prim does
+		// (tag_is in prims/mod.v), except where JavaScript cannot tell two
+		// blip types apart -- see the runtime note on int vs float.
+		'array?' { return 'array_q' }
+		'table?' { return 'table_q' }
+		'float?' { return 'float_q' }
+		'integer?' { return 'integer_q' }
+		'keyword?' { return 'keyword_q' }
+		'list?' { return 'list_q' }
+		'negative?' { return 'negative_q' }
+		'number?' { return 'number_q' }
+		'positive?' { return 'positive_q' }
+		'string?' { return 'string_q' }
+		'symbol?' { return 'symbol_q' }
+		'vector?' { return 'vector_q' }
+		'zero?' { return 'zero_q' }
+		'eq?' { return 'eq_q' }
+		'has-key?' { return 'has_key_q' }
+		'format' { return 'format' }
+		// These two are not reachable by the `-` to `_` rule: `string->number`
+		// mangles to `string_>number`, and `>` is not part of a JavaScript
+		// identifier, so the name is mangled to something that cannot hold the
+		// function. The prims are the two halves of a conversion pair -- `atoi`
+		// then `atof`, and back through the printer's spelling -- so the emitted
+		// forms go through the runtime instead of a bare identifier.
+		'string->number' { return 'string_number' }
+		'number->string' { return 'number_string' }
 		else {
 			return 'p_' + name.replace('-', '_').replace('?', '_q').replace('!', '_b')
 		}
@@ -1241,6 +1359,42 @@ const prim_names = {
 	'sort':           true
 	'string-length':  true
 	'vector-rev':     true
+		'table':          true
+		'buffer':         true
+		'get':            true
+		'table-keys':     true
+		'list':           true
+		'append':         true
+		'array-length':   true
+		'array-ref':      true
+		'put':            true
+		'remove':         true
+		'string-split':   true
+		'string-trim':    true
+		'string-index-of': true
+		'vector-append':  true
+		'array-push!':    true
+		'array-set!':     true
+		'put!':           true
+		'take':           true
+		'array?':         true
+		'table?':         true
+		'float?':         true
+		'integer?':       true
+		'keyword?':       true
+		'list?':          true
+		'negative?':      true
+		'number?':        true
+		'positive?':      true
+		'string?':        true
+		'symbol?':        true
+		'vector?':        true
+		'zero?':          true
+		'eq?':            true
+		'has-key?':       true
+		'format':         true
+		'string->number': true
+		'number->string': true
 }
 
 // stmt emits a form as a statement, and drops a trailing `;` when the form is

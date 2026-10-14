@@ -52,12 +52,105 @@ const blip = {
   // A symbol is tagged so the printer can show it bare, the way `blip run`
   // does. Emitting one as a plain string printed `done` as `"done"`.
   sym: (name) => ({ blip_sym: name }),
+  kw: (name) => ({ blip_kw: name }),
   // A vector is a tagged array, not a bare array. `[1 2 3]` and `(list 1 2 3)`
   // are different values in blip -- the printer writes one `[1 2 3]` and the
   // other `(1 2 3)` -- so the literal needs a marker the printer can see.
   // Without it every vector printed as a list, which is the mismatch that
   // stopped the two threading checks from passing.
   vec: (...items) => ({ blip_vec: items }),
+  // `append` concatenates sequences into a LIST: `(append [1] [2 3])` is
+  // `(1 2 3)`, not a vector. `unvec` flattens both tagged vectors and bare
+  // arrays, so either container works as input.
+  append: (...colls) => colls.flatMap((c) => unvec(c)),
+  // The 02_data batch. `array-ref` and `array-length` delegate to the vector
+  // versions (prim_array_ref calls prim_vector_ref; prim_array_length reads the
+  // same `.data.len`), because an array IS a vector with a different tag.
+  array_ref: (v, i) => unvec(v)[i],
+  array_length: (v) => unvec(v).length,
+  // `put` and `remove` return NEW tables (prim_put clones the map first), so
+  // the input is never mutated. `put!` and `remove!` mutate in place.
+  put: (t, k, v) => ({ blip_table: { ...(t.blip_table || {}), [k]: v } }),
+  remove: (t, k) => {
+    const next = { ...(t.blip_table || {}) };
+    delete next[k];
+    return { blip_table: next };
+  },
+  put_b: (t, k, v) => {
+    if (t && t.blip_table) t.blip_table[k] = v;
+    else if (t && t.blip_buffer) t.blip_buffer[k] = v;
+    return t;
+  },
+  // `string-split` answers a LIST of strings (prim_string_split ends in
+  // `blip.list_from`), `string-trim` trims both ends, and a missing needle is
+  // -1 rather than an error (prim_string_index_of returns -1 on no match).
+  string_split: (s, sep) => s.split(sep),
+  string_trim: (s) => s.trim(),
+  string_index_of: (hay, needle) => hay.indexOf(needle),
+  // `vector-append` answers a new VECTOR (`blip.vector(out)`), so it rewraps;
+  // `append` answers a list and does not. That asymmetry is the prims', not an
+  // invention here.
+  vector_append: (...colls) => ({ blip_vec: colls.flatMap((c) => unvec(c)) }),
+  // `array-push!` mutates and returns the SAME array (prim_array_push returns
+  // `args[0]`). `array-set!` mutates; out of range is an error in blip and
+  // throws here.
+  array_push_b: (v, x) => {
+    const items = unvec(v);
+    if (!Array.isArray(items)) throw new Error("array-push!: not an array");
+    items.push(x);
+    return v;
+  },
+  array_set_b: (v, i, x) => {
+    const items = unvec(v);
+    if (!Array.isArray(items) || i < 0 || i >= items.length) {
+      throw new Error("array-set!: index " + i + " out of range");
+    }
+    items[i] = x;
+    return null;
+  },
+  // `take` answers the first n items, preserving the container.
+  take: (coll, n) => {
+    const items = unvec(coll);
+    if (!Array.isArray(items)) return coll;
+    return rewrap(coll, items.slice(0, Math.max(0, n)));
+  },
+  // A list is a bare array: the printer writes `(1 2 3)`, which is the list
+  // spelling, and vectors carry the tag that separates them.
+  list: (...items) => items,
+  // The collection literals. An array is a VECTOR -- blip prints `@(1 2 3)` as
+  // `[1 2 3]`, which is the vector spelling -- so it carries the vector tag and
+  // needs no separate representation. A table is a keyword-to-value object.
+  // A buffer is a mutable table, which prints `@{...}`; the tag is all that
+  // separates the two shapes.
+  //
+  // `table` is variadic and alternating: item 0 is a key, 1 its value, 2 a key,
+  // and so on -- that is the shape `{:a 1 :b 2}` reads as.
+  table: (...kv) => {
+    const t = {};
+    for (let i = 0; i + 1 < kv.length; i += 2) t[kv[i]] = kv[i + 1];
+    return { blip_table: t };
+  },
+  buffer: (...kv) => {
+    const t = {};
+    for (let i = 0; i + 1 < kv.length; i += 2) t[kv[i]] = kv[i + 1];
+    return { blip_buffer: t };
+  },
+  // `get` reads a key, and a MISSING key is nil rather than an error -- which is
+  // what `(get {:a 1} :missing)` returns, and what the third argument overrides.
+  get: (t, k, ...rest) => {
+    const m = unvec(t);
+    const key = m && m.blip_table ? m.blip_table[k] : undefined;
+    if (key !== undefined && key !== null) return key;
+    return rest.length > 0 ? rest[0] : null;
+  },
+  // Keys print SORTED, which is what blip's printer does: `{:name "ada" :b 2}`
+  // reads `{:b 2 :name "ada"}`. That is not incidental -- a table literal in
+  // source order would make emitted output disagree with `blip run` for any
+  // table whose keys are not already alphabetical, and most are not.
+  table_keys: (t) => {
+    const m = unvec(t);
+    return m && m.blip_table ? Object.keys(m.blip_table).sort().map((k) => blip.kw(k)) : [];
+  },
   // Higher-order forms. Each drives its callback through `tramp`, because a
   // user function emitted by this backend returns a thunk when its body ends in
   // a tail call -- and most of them do. Using the thunk directly would hand it
@@ -109,6 +202,64 @@ const blip = {
       ? rewrap(coll, items.slice().sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)))
       : coll;
   },
+  // The type predicates. Each answers the tag check its prim does
+  // (prims/mod.v `tag_is`): `array?` is the array tag, `table?` the table tag,
+  // and so on. Two limits are stated, not hidden. First, `integer?` and
+  // `float?` cannot both be right in JavaScript, because `1.0` parses as `1`
+  // and the distinction is lost before any function runs: integers test
+  // `Number.isInteger`, floats test non-integers, and a blip float that happens
+  // to be whole still reads as an integer here. Second, `number?` covers JS
+  // numbers and rationals, which is what the numeric tower reduces to once the
+  // exact tags are gone.
+  array_q: (x) => !!(x && (x.blip_vec || x.blip_arr)),
+  table_q: (x) => !!(x && (x.blip_table || x.blip_buffer)),
+  float_q: (x) => typeof x === "number" && !Number.isInteger(x),
+  integer_q: (x) => typeof x === "number" && Number.isInteger(x),
+  keyword_q: (x) => !!(x && x.blip_kw !== undefined),
+  list_q: (x) => Array.isArray(x),
+  negative_q: (x) => typeof x === "number" && x < 0,
+  number_q: (x) => typeof x === "number" || !!(x && x.blip_rat),
+  positive_q: (x) => typeof x === "number" && x > 0,
+  string_q: (x) => typeof x === "string",
+  symbol_q: (x) => !!(x && x.blip_sym !== undefined),
+  vector_q: (x) => !!(x && (x.blip_vec || x.blip_arr)),
+  zero_q: (x) => x === 0,
+  eq_q: (a, b) => blip_equal(a, b),
+  // `has-key?` tests membership without reading: a present key holding nil
+  // still counts (prim_has_key checks `has`, not `get`), which a `get`-based
+  // test would get wrong.
+  has_key_q: (t, k) => {
+    const m = unvec(t);
+    if (m && m.blip_table) return k in m.blip_table;
+    if (m && m.blip_buffer) return k in m.blip_buffer;
+    return false;
+  },
+  // `format` substitutes `~a` bare and `~s` shown (machine/mod.v format_args
+  // via show_value: a string with `~a` prints without quotes, with `~s` it
+  // prints as the printer writes it). Anything else passes through literally.
+  format: (fmt, ...args) => {
+    let n = 0;
+    return String(fmt).replace(/~[as]/g, (m) => {
+      if (n >= args.length) return m;
+      const v = args[n++];
+      if (m === "~s") return blip_show(v);
+      return typeof v === "string" ? v : blip_show(v);
+    });
+  },
+  // The numeric conversions. `string->number` answers nil on a string that is
+  // neither an integer nor a float (prim_string_to_number returns
+  // nil_value rather than an error), and a whole-valued float parses as an
+  // integer here because JavaScript has one number type.
+  string_number: (s) => {
+    const t = String(s).trim();
+    if (t === "") return null;
+    const n = Number(t);
+    return Number.isNaN(n) ? null : n;
+  },
+  // `number->string` reads through the printer, which is why a float that
+  // happens to be whole prints with its decimal part in blip and without one
+  // here: "42", not "42.0". The integer spelling is exact.
+  number_string: (n) => typeof n === "string" ? n : String(n),
   // `even?` and `odd?` are primitives in blip (prims/mod.v). They are not the
   // `letrec` bindings in examples/01_basics.lip -- those shadow them locally,
   // and the top-level `(filter even? ...)` uses the primitive. An emitter with
@@ -141,8 +292,37 @@ function blip_show(x) {
   if (x && x.blip_rat) return x.blip_rat[0] + "/" + x.blip_rat[1];
   // A symbol prints bare: `done`, not `"done"` and not `'"done"'`.
   if (x && x.blip_sym !== undefined) return x.blip_sym;
+  // A keyword prints `:k`. Stored bare it would lose the colon, stored quoted
+  // it would print `":k"`, so it is tagged like a symbol.
+  if (x && x.blip_kw !== undefined) return ":" + x.blip_kw;
   // A vector prints `[...]`, the way the blip printer writes one.
   if (x && x.blip_vec) return "[" + x.blip_vec.map(blip_show).join(" ") + "]";
+  // A table prints `{:k v}` and a buffer `@{:k v}`, both with SORTED keys, which
+  // is the blip printer's own ordering: `{:name "ada" :b 1815}` reads
+  // `{:b 1815 :name "ada"}`. Measured against `blip run`, not assumed.
+  // A keyword prints `:k`, bare like a symbol. Storing it as a string would
+  // quote it, so tables and buffers keep keys as plain names and mark them
+  // here with `blip.kw`, whose printer is the `:` prefix.
+  if (x && x.blip_buffer) {
+    const keys = Object.keys(x.blip_buffer).sort();
+    if (keys.length == 0) return "@{}";
+    const kv = [];
+    for (const k of keys) {
+      kv.push(blip.kw(k));
+      kv.push(x.blip_buffer[k]);
+    }
+    return "@{" + kv.map(blip_show).join(" ") + "}";
+  }
+  if (x && x.blip_table) {
+    const keys = Object.keys(x.blip_table).sort();
+    if (keys.length == 0) return "{}";
+    const kv = [];
+    for (const k of keys) {
+      kv.push(blip.kw(k));
+      kv.push(x.blip_table[k]);
+    }
+    return "{" + kv.map(blip_show).join(" ") + "}";
+  }
   // A struct prints the way `blip run` prints one: (Name field field ...).
   if (x && x.blip_struct !== undefined) {
     const vals = Object.keys(x)
