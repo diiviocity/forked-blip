@@ -241,6 +241,16 @@ fn (mut e Emitter) special(name string, id reader.NodeId, kids []reader.NodeId) 
 			return true
 		}
 	}
+	// `->` and `->>` in statement position are the same expression followed by
+	// a semicolon. Without this a top-level threading form fell to the ordinary
+	// call path, which mangled `->>` into an identifier and emitted a call to a
+	// function that does not exist -- silently, with no refusal.
+	for threader in ['->', '->>'] {
+		if name == threader {
+			e.emit('${e.value(id)};')
+			return true
+		}
+	}
 	if name == 'quote' {
 		e.emit('${e.value(kids[1])};')
 		return true
@@ -339,7 +349,7 @@ fn (mut e Emitter) special(name string, id reader.NodeId, kids []reader.NodeId) 
 // Everything NOT in this list and not handled above is a plain function call.
 	const unsupported_forms = ['loop', 'dotimes', 'match', 'match*',
 	'struct', 'use', 'require', 'provide',
-	'try', 'do', 'defmacro', 'macex', 'macex1', 'as->', '->', '->>', '|>',
+	'try', 'do', 'defmacro', 'macex', 'macex1', 'as->',
 	'cond->', 'import', 'quasiquote', 'unquote', 'unquote-splicing']
 
 fn (mut e Emitter) emit_define(kids []reader.NodeId) {
@@ -595,7 +605,9 @@ fn (mut e Emitter) value(id reader.NodeId) string {
 			for k in kids {
 				parts << e.value(k)
 			}
-			return '[${parts.join(', ')}]'
+			// A vector is not an array: `[1 2 3]` prints `[1 2 3]` where a list
+			// prints `(1 2 3)`, so it is tagged and the printer reads the tag.
+			return 'blip.vec(${parts.join(', ')})'
 		}
 		.quoted {
 			// `'(1 2 3)` is a list literal. A quoted symbol is just its name,
@@ -735,6 +747,14 @@ fn (mut e Emitter) expression_form(name string, kids []reader.NodeId) ?string {
 	// matches several subjects at once, which is a different shape entirely.
 	if name == 'match' {
 		return e.match_expr(kids)
+	}
+	// The threading macros. `->` puts the value FIRST in every step, `->>` puts it
+	// LAST, and a bare symbol step is a call with the value alone:
+	//   (->> [1 2 3] (vector-map f) vector-rev)  =  (vector-rev (vector-map f [1 2 3]))
+	//   (-> {:a 1 :b 2} table-keys sort)         =  (sort (table-keys {:a 1 :b 2}))
+	//   (->> "hello" |> string-upcase)           =  (string-upcase "hello")
+	if name == '->' || name == '->>' {
+		return e.thread_expr(kids, name == '->>')
 	}
 	// calls. The `kids.len >= 2` guard these used to have let `(or)` through as
 	// `or()`, a ReferenceError to a function that does not exist.
@@ -885,6 +905,82 @@ fn (mut e Emitter) match_expr(kids []reader.NodeId) string {
 	return '((${out}))'
 }
 
+// thread_expr builds `(-> x steps...)` / `(->> x steps...)`.
+//
+// A step that is a FORM is `(f a b)` and the threaded value goes first or last
+// among its arguments. A step that is a bare symbol is `(f)` with the value as
+// the only argument -- `|>` is the common one, which is why it has to work as a
+// step name and not only as a form head.
+fn (mut e Emitter) thread_expr(kids []reader.NodeId, is_last bool) string {
+	if kids.len < 2 {
+		return 'null'
+	}
+	// A pipe inside a pipe is SPLICED, not nested. `(->> x |> f |> g)` threads
+	// x through f and then g; it does not call `|>` with two arguments. This is
+	// the machine's own rule (machine/mod.v eval_pipe: an inner pipe head's
+	// steps are threaded with the OUTER mode), so the emitter splices inner
+	// `->`, `->>` and `|>` steps into the current thread rather than emitting
+	// a call to a mangled name that exists nowhere.
+	//
+	// `as->` and `cond->` are refused instead: they bind and branch, so their
+	// steps are not plain thread steps and splicing them would mean something
+	// else. A refusal names the gap; a splice would hide it.
+	mut steps := []reader.NodeId{}
+	for step in kids[2..] {
+		d := e.node(step)
+		if d.tag == .list {
+			inner := e.kids(step)
+			if inner.len > 0 {
+				h := e.node(inner[0])
+				if h.tag == .sym && h.value in ['->', '->>', '|>'] {
+					for s in inner[2..] {
+						steps << s
+					}
+					continue
+				}
+				if h.tag == .sym && h.value in ['as->', 'cond->'] {
+					e.refuse(h.value)
+					return 'null'
+				}
+			}
+		}
+		steps << step
+	}
+	e.gensym++
+	acc := '__blip_thread${e.gensym}'
+	e.emit('let ${acc} = ${e.value(kids[1])};')
+	for step in steps {
+		d := e.node(step)
+		if d.tag == .sym {
+			// A bare symbol step: the value is the whole argument list.
+			e.emit('${acc} = tramp(${e.callable(d.value)}(${acc}));')
+			continue
+		}
+		if d.tag != .list {
+			continue
+		}
+		inner := e.kids(step)
+		if inner.len == 0 {
+			continue
+		}
+		callee := e.value(inner[0])
+		mut args := []string{}
+		// `->` threads FIRST, `->>` threads LAST. `is_last` is true for `->>`,
+		// so the accumulator goes after the step's own arguments there.
+		if !is_last {
+			args << acc
+		}
+		for a in inner[1..] {
+			args << e.value(a)
+		}
+		if is_last {
+			args << acc
+		}
+		e.emit('${acc} = tramp(${callee}(${args.join(', ')}));')
+	}
+	return acc
+}
+
 // guarded wraps a match clause body in its `#:when` guard when it has one.
 fn (mut e Emitter) guarded(test string, guard string, body string, fallback string) string {
 	if guard == '' {
@@ -1031,7 +1127,7 @@ fn (mut e Emitter) data(id reader.NodeId) string {
 			for k in kids {
 				parts << e.data(k)
 			}
-			return '[${parts.join(', ')}]'
+			return 'blip.vec(${parts.join(', ')})'
 		}
 		else {
 			return e.value(id)
@@ -1089,11 +1185,16 @@ fn mangle(name string) string {
 		// somewhere that looks plausible and is not there.
 		'even?' { return 'even_q' }
 		'odd?' { return 'odd_q' }
+		'|>' { return 'pipe' }
 		'map' { return 'map' }
 		'filter' { return 'filter' }
 		'fold' { return 'fold' }
 		'for-each' { return 'for_each' }
 		'vector-map' { return 'vector_map' }
+		'reverse' { return 'reverse' }
+		'sort' { return 'sort' }
+		'string-length' { return 'string_length' }
+		'vector-rev' { return 'reverse' }
 		else {
 			return 'p_' + name.replace('-', '_').replace('?', '_q').replace('!', '_b')
 		}
@@ -1130,11 +1231,16 @@ const prim_names = {
 	'vector-length':  true
 	'even?':          true
 	'odd?':           true
+	'|>':             true
 	'map':            true
 	'filter':         true
 	'fold':           true
 	'for-each':       true
 	'vector-map':     true
+	'reverse':        true
+	'sort':           true
+	'string-length':  true
+	'vector-rev':     true
 }
 
 // stmt emits a form as a statement, and drops a trailing `;` when the form is

@@ -26,19 +26,24 @@ const blip = {
   missing: (...a) => {
     throw new Error("blip: unimplemented primitive");
   },
-  car: (x) => x[0],
-  cdr: (x) => x.slice(1),
-  cons: (x, y) => Array.isArray(y) ? [x].concat(y) : [x, y],
-  p_null_q: (x) => x === null || x === undefined || (Array.isArray(x) && x.length === 0),
+  car: (x) => unvec(x)[0],
+  cdr: (x) => unvec(x).slice(1),
+  cons: (x, y) => [x].concat(unvec(y)),
+  p_null_q: (x) => x === null || x === undefined
+    || (Array.isArray(unvec(x)) && unvec(x).length === 0),
   not: (x) => !blip_truthy(x),
   p_equal_q: (a, b) => blip_equal(a, b),
   apply: (f, ...a) => f(...a),
-  length: (x) => (Array.isArray(x) || typeof x === "string") ? x.length : null,
-  vector_ref: (v, i) => v[i],
-  vector_length: (v) => v.length,
+  length: (x) => {
+    const items = unvec(x);
+    return Array.isArray(items) || typeof items === "string" ? items.length : null;
+  },
+  vector_ref: (v, i) => unvec(v)[i],
+  vector_length: (v) => unvec(v).length,
   string_upcase: (s) => s.toUpperCase(),
   string_downcase: (s) => s.toLowerCase(),
   string_append: (...a) => a.join(""),
+  string_length: (s) => (typeof s === "string" ? s.length : 0),
   // A rational is a tagged pair, not a JavaScript number. JavaScript has no
   // exact rational, and widening 1/3 to 0.3333333333333333 would make the
   // emitted program disagree with `blip run` on the value the numeric tower
@@ -47,6 +52,12 @@ const blip = {
   // A symbol is tagged so the printer can show it bare, the way `blip run`
   // does. Emitting one as a plain string printed `done` as `"done"`.
   sym: (name) => ({ blip_sym: name }),
+  // A vector is a tagged array, not a bare array. `[1 2 3]` and `(list 1 2 3)`
+  // are different values in blip -- the printer writes one `[1 2 3]` and the
+  // other `(1 2 3)` -- so the literal needs a marker the printer can see.
+  // Without it every vector printed as a list, which is the mismatch that
+  // stopped the two threading checks from passing.
+  vec: (...items) => ({ blip_vec: items }),
   // Higher-order forms. Each drives its callback through `tramp`, because a
   // user function emitted by this backend returns a thunk when its body ends in
   // a tail call -- and most of them do. Using the thunk directly would hand it
@@ -54,21 +65,70 @@ const blip = {
   // result was first used rather than at the call.
   //
   // `map` and `filter` preserve the container, which is the rule blip settled:
-  // `(map f [1 2 3])` is `[1 4 9]`, a vector, not a list.
-  map: (f, coll) => Array.isArray(coll) ? coll.map((x) => tramp(f(x))) : coll,
-  filter: (f, coll) => Array.isArray(coll)
-    ? coll.filter((x) => blip_truthy(tramp(f(x))))
-    : coll,
-  fold: (f, init, coll) => Array.isArray(coll)
-    ? coll.reduce((acc, x) => tramp(f(acc, x)), init)
-    : init,
+  // `(map f [1 2 3])` is `[1 4 9]`, a vector, not a list. Each unwraps a tagged
+  // vector first and rewraps after, so the container survives the call.
+  map: (f, coll) => {
+    const items = unvec(coll);
+    return Array.isArray(items) ? rewrap(coll, items.map((x) => tramp(f(x)))) : coll;
+  },
+  filter: (f, coll) => {
+    const items = unvec(coll);
+    return Array.isArray(items)
+      ? rewrap(coll, items.filter((x) => blip_truthy(tramp(f(x)))))
+      : coll;
+  },
+  vector_map: (f, coll) => {
+    const items = unvec(coll);
+    return Array.isArray(items)
+      ? rewrap(coll, items.map((x) => tramp(f(x))))
+      : coll;
+  },
+  fold: (f, init, coll) => {
+    const items = unvec(coll);
+    return Array.isArray(items)
+      ? items.reduce((acc, x) => tramp(f(acc, x)), init)
+      : init;
+  },
+  // `|>` is a pipe: (x |> f) is (f x). It is also the most common bare-symbol
+  // step inside `->>`, so it has to be a real function and not only syntax.
+  // Called with one argument it is the identity: a bare `|>` step becomes the
+  // single-arg call `(pipe acc)`, and blip's own `|>` on one argument returns
+  // the argument unchanged (machine/mod.v pipe_one: a non-call step becomes
+  // `(step acc)`, so `(|> "hello")` is a call whose value is `"hello"`).
+  pipe: (x, f) => (f === undefined ? x : tramp(f(x))),
+  reverse: (coll) => {
+    const items = unvec(coll);
+    return Array.isArray(items) ? rewrap(coll, items.slice().reverse()) : coll;
+  },
+  // `sort` is ascending, and it copies rather than sorting in place: blip's
+  // collections are values, and sorting the caller's array would make
+  // `(->> [3 1 2] |> sort)` change what the caller holds.
+  sort: (coll) => {
+    const items = unvec(coll);
+    return Array.isArray(items)
+      ? rewrap(coll, items.slice().sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)))
+      : coll;
+  },
   // `even?` and `odd?` are primitives in blip (prims/mod.v). They are not the
   // `letrec` bindings in examples/01_basics.lip -- those shadow them locally,
   // and the top-level `(filter even? ...)` uses the primitive. An emitter with
   // no binding for them emits a call to a name nobody defined.
-  even_q: (n) => n % 2 === 0,
-  odd_q: (n) => n % 2 !== 0,
+  even_q: (n) => unvec(n) % 2 === 0,
+  odd_q: (n) => unvec(n) % 2 !== 0,
 };
+
+// unvec unwraps a tagged vector to its items, and returns anything else
+// unchanged. Every collection function goes through it, because a tagged vector
+// is not an Array and `Array.isArray` is false for one -- which would make
+// `sort`, `map` and `reverse` silently pass a vector through untouched.
+function unvec(x) { return x && x.blip_vec ? x.blip_vec : x; }
+
+// rewrap puts the items back into a tagged vector when the input was one, so
+// `sort` of a vector is still a vector. Without this the thread step would
+// change the container and the printed spelling would drift.
+function rewrap(orig, items) {
+  return orig && orig.blip_vec ? { blip_vec: items } : items;
+}
 
 // blip_show is the printer. It is separate from console.log because blip prints
 // a string WITH its quotes, the way the blip printer does -- printing one without
@@ -81,6 +141,8 @@ function blip_show(x) {
   if (x && x.blip_rat) return x.blip_rat[0] + "/" + x.blip_rat[1];
   // A symbol prints bare: `done`, not `"done"` and not `'"done"'`.
   if (x && x.blip_sym !== undefined) return x.blip_sym;
+  // A vector prints `[...]`, the way the blip printer writes one.
+  if (x && x.blip_vec) return "[" + x.blip_vec.map(blip_show).join(" ") + "]";
   // A struct prints the way `blip run` prints one: (Name field field ...).
   if (x && x.blip_struct !== undefined) {
     const vals = Object.keys(x)
@@ -104,9 +166,11 @@ function blip_truthy(x) {
 
 function blip_equal(a, b) {
   if (a === null || a === undefined) return b === null || b === undefined;
-  if (Array.isArray(a) && Array.isArray(b)) {
-    if (a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++) if (!blip_equal(a[i], b[i])) return false;
+  const ua = unvec(a);
+  const ub = unvec(b);
+  if (Array.isArray(ua) && Array.isArray(ub)) {
+    if (ua.length !== ub.length) return false;
+    for (let i = 0; i < ua.length; i++) if (!blip_equal(ua[i], ub[i])) return false;
     return true;
   }
   return a === b;

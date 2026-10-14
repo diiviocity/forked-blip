@@ -127,6 +127,22 @@ fn main() {
 
 	s.check('a lambda applied', '(print ((fn [x] (* x x)) 7))')
 
+	// Threading. Each of these is prims and machine forms only, so the blip
+	// side runs without the standard library -- which matters because
+	// blip_output does not load it.
+	s.check('thread-last through a call step', '(print (->> [1 2 3] (vector-map (fn [x] (* x 10))) vector-rev))')
+
+	s.check('thread-last through bare pipe steps', '(print (->> "hello" |> string-upcase |> string-length))')
+
+	s.check('thread-last sorts then reverses', '(print (->> [3 1 2] |> sort |> reverse))')
+
+	s.check('thread-first puts the value first', '(print (-> 10 (/ 4)))')
+
+	// A pipe inside a pipe is SPLICED, not nested: the inner steps join the
+	// outer thread. Without this the inner head emits as a call to a mangled
+	// name that exists nowhere.
+	s.check('nested pipes splice into the outer thread', '(print (-> (quote (9)) (->> (quote (1)) (car))))')
+
 	s.real_programs()
 
 	if s.fails > 0 {
