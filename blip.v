@@ -192,22 +192,17 @@ fn run_files(paths []string) int {
 // because `blip run` loads it in front of the file too. Without it the emitted
 // JavaScript references `lookup-sym`, `validate`, `sqrt` and every other stdlib
 // name as identifiers nothing defines -- the program emits cleanly and then dies
-// at the first call. The order is the load order, so a program that shadows a
-// stdlib name shadows it here exactly as it does there.
+// at the first call. The gate knows the same thing, and both go through
+// `compile_program` so the knowledge is not in two places to drift.
 fn emit_js(paths []string) int {
 	mut code := 0
-	std_src := os.read_file('lib/std.lip') or {
-		eprintln('blip: cannot read lib/std.lip; emitted programs would miss it')
-		code = 1
-		return code
-	}
 	for path in paths {
 		src := os.read_file(path) or {
 			eprintln('blip: cannot read ${path}')
 			code = 1
 			continue
 		}
-		res := emit.compile(std_src + '\n' + src) or {
+		res := emit.compile_program(src) or {
 			eprintln('blip: ${path}: ${err.msg()}')
 			code = 1
 			continue

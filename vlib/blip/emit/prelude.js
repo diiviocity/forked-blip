@@ -570,22 +570,34 @@ function pat_match(pat, subj) {
   const last = rest[rest.length - 1];
   const isWc = last[0] === "wc";
   const isCap = last[0] === "sym";
-  // `["pos"]` is the headless form `(a b c)`, and it is NOT the same rule as
-  // `["list"]`. Measured: `(a b c)` on '(1 2 3) binds c to (2 3) even though the
-  // lengths are equal, while `(list a b c)` on the same subject binds c to 3.
-  // match_list_tail tail-captures on a bare last symbol unconditionally, and the
-  // `list` branch tests the length first. So the two spellings disagree in blip,
-  // and an emitter that merged them would be wrong about one of the two.
-  const tails = pat[0] === "pos"
-    ? isCap
-    : !isWc && isCap && rest.length !== items.length;
+  // `["pos"]` is the headless form `(a b c)`, and it is NOT the `list` rule.
+  // match_list_tail drops the FIRST element -- positional() is handed the whole
+  // kids and then does `rest := kids[1..]` -- and it has NO length check at all:
+  // it walks the patterns and fails when it runs out of items. Measured, and all
+  // three of these fall out of that one rule:
+  //
+  //   (a b c)   on '(1 2 3)   rest is [b c], so c takes items[1..] -- (2 3)
+  //   (_ _ x)   on '(1 2 3)   rest is [_ x], so x takes items[1..] -- (2 3)
+  //   (x _)     on '(1 2 3)   rest is [_], which binds NOTHING, so `x` in the body
+  //                          is unbound -- which is what blip reports
   if (pat[0] === "pos") {
-    if (isWc) {
-      if (rest.length - 1 !== items.length) return "no";
-    } else if (rest.length - 1 > items.length) {
-      return "no";
+    const out = {};
+    for (let i = 0; i < rest.length; i++) {
+      if (i === rest.length - 1 && isCap) {
+        const r = pat_match(rest[i], items.length > i ? items.slice(i) : []);
+        if (r === "no") return "no";
+        Object.assign(out, r);
+        continue;
+      }
+      if (i >= items.length) return "no";
+      const r = pat_match(rest[i], items[i]);
+      if (r === "no") return "no";
+      Object.assign(out, r);
     }
-  } else if (isWc) {
+    return out;
+  }
+  const tails = !isWc && isCap && rest.length !== items.length;
+  if (isWc) {
     if (rest.length - 1 !== items.length) return "no";
   } else if (tails) {
     if (rest.length > items.length) return "no";

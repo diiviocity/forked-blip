@@ -1,5 +1,6 @@
 module emit
 
+import os
 import vlib.blip.reader
 
 // Blip to JavaScript.
@@ -23,6 +24,24 @@ pub struct Result {
 pub mut:
 	js      string
 	blocked []string
+}
+
+// compile_program turns a blip PROGRAM into a JavaScript module, with the
+// standard library in front of it -- in load order, which is the order `blip run`
+// uses, so a program that shadows a stdlib name shadows it here too.
+//
+// It is separate from `compile` because knowing that a program needs the stdlib
+// is the caller's decision, not something a transpiler should assume: a caller
+// that wants a bare module, or one that has already prepended the library, gets
+// nonsense from a second copy. Both callers that emit runnable programs -- the
+// CLI and the gate -- go through here, so the knowledge lives in one place
+// instead of being re-derived and forgotten, which is how the gate ended up
+// running examples with no `lookup-sym` and calling the silence a failure.
+pub fn compile_program(src string) !Result {
+	std_src := os.read_file('lib/std.lip') or {
+		return error('cannot read lib/std.lip: ${err.msg()}')
+	}
+	return compile(std_src + '\n' + src)
 }
 
 // compile turns blip source into a JavaScript module.
@@ -1276,10 +1295,19 @@ if !pattern_predicate(head.value) {
 // positional_pattern is the `(a b c)` shape, with the last position allowed to
 // take the remainder. Whether it does is decided by the RUNTIME, because that
 // depends on the subject's length: positional first, tail second.
+//
+// The `pos` node DROPS its first element. That is not a quirk of the emitter:
+// machine/match.v's positional() is handed the whole `kids` and match_list_tail
+// then reads `rest := kids[1..]`, so a headless pattern's first element is
+// treated as a head and never tested. Measured, and the rule explains all three:
+// `(a b c)` on '(1 2 3) is [b c], so `c` takes (2 3); `(_ _ x)` is [_ x], so `x`
+// takes (2 3); and `(x _)` is [_], which binds nothing at all -- which is why blip
+// reports `x` unbound in that clause's body.
 fn (mut e Emitter) positional_pattern(kids []reader.NodeId, node string) Pat {
 	mut parts := [json_str(node)]
 	mut names := []string{}
-	for k in kids {
+	mut rest := if node == 'pos' { kids[1..] } else { kids }
+	for k in rest {
 		p := e.pattern(k)
 		if !p.ok {
 			return bad_pat()

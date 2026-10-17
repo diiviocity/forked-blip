@@ -75,6 +75,26 @@ fn node_output(js string) string {
 	return got.trim_right('\n')
 }
 
+// blip_file_output runs a FILE through the blip CLI, which loads lib/std.lip.
+//
+// The in-process `blip_output` deliberately does NOT load the standard library,
+// because these checks are small snippets of primitives and a 630-line prelude
+// per check is not worth it. An EXAMPLE is not a snippet: it needs stdlib on both
+// sides, or the comparison is between a program and a program missing half its
+// definitions. Both engines therefore get the same load order.
+fn blip_file_output(path string) string {
+	os.mkdir_all('tmp') or {}
+	out_path := os.join_path(os.getwd(), 'tmp', 'emit_blip.out')
+	os.rm(out_path) or {}
+	shelled := os.system('blip run "${path}" > "${out_path}" 2>&1')
+	got := os.read_file(out_path) or { '' }
+	os.rm(out_path) or {}
+	if shelled != 0 {
+		return 'ERROR: blip exited ${shelled}: ${got.trim_space().limit(200)}'
+	}
+	return got.trim_right('\n')
+}
+
 // check emits the source, runs both engines on it, and compares.
 fn (mut s Suite) check(label string, src string) {
 	res := emit.compile(src) or {
@@ -104,7 +124,20 @@ fn (mut s Suite) check_example(name string) {
 		println('FAIL ${name} => cannot read ${path}')
 		return
 	}
-	s.check('${name} output matches the interpreter', src)
+	res := emit.compile_program(src) or {
+		s.fails++
+		println('FAIL ${name} => emit failed: ${err.msg()}')
+		return
+	}
+	if res.blocked.len > 0 {
+		s.fails++
+		println('FAIL ${name} => refused: ${res.blocked.join(', ')}')
+		return
+	}
+	// Both sides run the same FILE, so both get lib/std.lip. Comparing an emitted
+	// program against a snippet-only interpreter is how 03_match looked like a
+	// failure of the backend when it was a missing prelude.
+	s.eq('${name} output matches the interpreter', node_output(res.js), blip_file_output(path))
 }
 
 fn main() {
@@ -165,6 +198,8 @@ fn main() {
 	// have not caught up.
 	s.check_example('02_data')
 
+	s.check_example('03_match')
+
 	s.real_programs()
 
 	if s.fails > 0 {
@@ -197,7 +232,7 @@ fn (mut s Suite) real_programs() {
 		src := os.read_file(path) or {
 			continue
 		}
-		res := emit.compile(src) or {
+		res := emit.compile_program(src) or {
 			refused << '${ex}: ${err.msg()}'
 			continue
 		}
