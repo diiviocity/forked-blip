@@ -247,12 +247,43 @@ fn (mut m Machine) match_list_at(pat blip.NodeId, subject blip.Value, depth int)
 				}
 			}
 			rest := kids[1..]
-			if rest.len == 0 || m.is_wildcard(rest[rest.len - 1]) {
+			// The length rule, which used to be the whole of this branch and made
+			// `(list 1 rest)` refuse a three-element subject -- contradicting the
+			// example, the destructuring comment above, and `is_capturing_tail`'s
+			// own name.
+			//
+			// Positional first, tail second, and that ORDER is what lets both
+			// example lines be true at once:
+			//
+			//   (list a b c)     three elements, all positional: c is 3
+			//   (list 1 rest)    two patterns, three elements: rest is (2 3)
+			//
+			// Exactness stays available, and it is the `_` slot that provides it:
+			// `(list a b c _)` means exactly three, because `_` is neither a
+			// capturing tail nor a binder. That was the one thing the old
+			// wildcard branch did right, so it is kept verbatim.
+			if rest.len == 0 {
+				return Matched{
+					ok: items.len == 0
+				}
+			}
+			mut tails := false
+			if m.is_wildcard(rest[rest.len - 1]) {
 				if rest.len - 1 != items.len {
 					return Matched{
 						ok: false
 					}
 				}
+			} else if m.is_capturing_tail(rest[rest.len - 1]) && rest.len != items.len {
+				// A tail capture needs room for the patterns before it AND at least
+				// one element to swallow, so `(list a b c)` on a two-element subject
+				// still fails instead of quietly binding `c` to the empty list.
+				if rest.len > items.len {
+					return Matched{
+						ok: false
+					}
+				}
+				tails = true
 			} else if rest.len != items.len {
 				return Matched{
 					ok: false
@@ -261,12 +292,36 @@ fn (mut m Machine) match_list_at(pat blip.NodeId, subject blip.Value, depth int)
 			mut binds := []Bind{}
 			mut i := 0
 			for i < rest.len {
-				want := items[i]
+				// A wildcard is skipped BEFORE the bounds check, because it is the
+				// one slot that is allowed to sit past the end: `(list a b c _)`
+				// tests length 3 with four patterns, and the fourth binds nothing.
+				// Checking bounds first made that exact-length spelling unfailable
+				// in the other direction -- it never matched anything.
 				if m.is_wildcard(rest[i]) {
 					i++
 					continue
 				}
-				sub := m.match_at(rest[i], want, depth + 1)!
+				if tails && i == rest.len - 1 {
+					mut tail := blip.empty_list()
+					if items.len > i {
+						tail = blip.list_from(items[i..])
+					}
+					sub := m.match_at(rest[i], tail, depth + 1)!
+					if !sub.ok {
+						return Matched{
+							ok: false
+						}
+					}
+					binds << sub.binds
+					i++
+					continue
+				}
+				if i >= items.len {
+					return Matched{
+						ok: false
+					}
+				}
+				sub := m.match_at(rest[i], items[i], depth + 1)!
 				if !sub.ok {
 					return Matched{
 						ok: false

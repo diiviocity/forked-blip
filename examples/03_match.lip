@@ -125,4 +125,39 @@
   [(5 _)   'worked]
   [(_ bad) bad])                        ;=> divide-by-zero
 
+;; =====================================================================
+;; the length rule, asserted
+;; =====================================================================
+;;
+;; Everything above this block answers itself in a `;=>` comment, and a comment
+;; is not a test: an assertion nobody runs cannot tell you the rule changed. The
+;; length rule is the one worth pinning, because two spellings of one idea used
+;; to disagree -- `(list a b c)` demanded exactly three while `(a b c)` took a
+;; tail -- and the disagreement was invisible until a program depended on it.
+;;
+;; Positional first, tail second:
+;;
+;;   (list a b c)    three elements: all positional, c is 3
+;;   (list 1 rest)   two patterns, three elements: rest is the remainder
+;;   (list a b c _)  exactly three -- `_` is not a capturing tail
+;;   (list 1)        exactly one, because 1 is a literal
+;;   (list)          the empty sequence
+
+(assert (= (match '(1 2 3) [(list a b c) (+ a b c)] [_ 0]) 6)
+  "a list pattern of the right length is positional")
+(assert (= (match '(1 2 3) [(list 1 rest) rest] [_ 'no]) '(2 3))
+  "a bare symbol in the last position takes the remainder")
+(assert (= (match '(1 2 3) [(list a b c _) 'exact3] [_ 'no]) 'exact3)
+  "a trailing _ asks for an exact length")
+(assert (= (match '(1 2 3) [(list 1) 'singleton] [_ 'no]) 'no)
+  "a literal in the last position is not a tail capture")
+(assert (= (match '(1 2) [(list a b c) 'matched] [_ 'no]) 'no)
+  "a tail capture needs an element to swallow")
+(assert (= (match '() [(list) 'empty] [_ 'no]) 'empty)
+  "(list) matches the empty sequence")
+(assert (= (match '(1 2 3) [(_ _ x) x] [_ 'no]) '(2 3))
+  "a headless pattern takes the same tail")
+(assert (= (match [1] [(vector v) v] [_ 'no]) 1)
+  "vector patterns are list patterns")
+
 (print "match ok")
