@@ -48,8 +48,13 @@
   [(struct Point x: px y: py) (+ px py)])   ;=> 7
 
 ;; --- and / or build compound patterns ---
+;; A comparison pattern applies the SUBJECT as the first argument: `(>= 7)` is
+;; "the subject is at least 7". It used to be written `(> 7)`, which on a subject
+;; of 7 is false, so the clause below answered `other` while the comment claimed
+;; `big-odd`. The line is the difference between a pattern that reads the way you
+;; mean and one that quietly does not.
 (match 7
-  [(and odd? (> 7)) 'big-odd]
+  [(and odd? (>= 7)) 'big-odd]
   [_ 'other])                          ;=> big-odd
 
 (match 5
@@ -63,7 +68,11 @@
   [_ 'small])                          ;=> big
 
 ;; --- guards ---
-(match 5
+;; The subject has to be a SEQUENCE, because `(list x)` asks for one. Written
+;; against the bare number 5 both clauses missed and the match answered nil --
+;; which reads like a broken guard rather than a broken pattern, and was the
+;; reason this comment claimed `odd` for something that never matched.
+(match '(5)
   [(list x) #:when (even? x) 'even]
   [(list x) #:when (odd? x)  'odd])    ;=> odd
 
@@ -159,5 +168,18 @@
   "a headless pattern takes the same tail")
 (assert (= (match [1] [(vector v) v] [_ 'no]) 1)
   "vector patterns are list patterns")
+
+;; A comparison pattern applies the subject as the first argument, so `(> 7)` is
+;; "greater than 7" and is false for a subject of 7. The line above is `(>= 7)`
+;; for exactly that reason, and this keeps it that way.
+(assert (= (match 7 [(and odd? (>= 7)) 'big-odd] [_ 'other]) 'big-odd)
+  "and conjoins a comparison pattern with a predicate")
+
+;; A `list` pattern asks the subject for a sequence, so it misses a bare number
+;; -- both guarded clauses above miss, and the match answers nil.
+(assert (nil? (match 5 [(list x) 'one]))
+  "a list pattern does not match a number")
+(assert (= (match '(5) [(list x) #:when (odd? x) 'odd] [_ 'other]) 'odd)
+  "a guard is tested with the bindings in scope")
 
 (print "match ok")
