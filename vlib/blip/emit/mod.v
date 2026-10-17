@@ -56,6 +56,7 @@ pub fn compile(src string) !Result {
 		top:      map[string]bool{}
 		mangled:  map[string]string{}
 		collided: map[string]string{}
+		takes_kwargs: map[string]bool{}
 	}
 	// Two passes, because a function may refer to a name defined later in the
 	// file -- ordinary in blip, impossible in a `const` declaration.
@@ -117,21 +118,39 @@ mut:
 	gensym   int
 	mangled  map[string]string
 	collided map[string]string
-	// locals are the names bound by an enclosing construct, innermost last. A
-	// local SHADOWS a primitive of the same name, exactly as it does in blip: a
-	// `match` clause binds `rest`, and a body that says `rest` means that
-	// binding. Routing it to `blip.rest` instead is not a wrong answer -- it is
-	// the primitive printed as its own source, which is what `(list 1 rest)`
-	// produced.
-	locals []map[string]bool
+	// locals map each blip name bound by an enclosing construct to the JavaScript
+	// identifier that holds it, innermost last. The indirection is not tidiness:
+	// a `use` binds a single result to the CALLEE's own name, so `(use (connect
+	// "h") ...)` binds `connect` -- and a `let connect` in the same block shadows
+	// the very function being called, which JavaScript resolves as a temporal dead
+	// zone rather than as a frame. blib makes the binding in a NEW frame after the
+	// call returns, so the map gives the binding its own identifier and the body
+	// reads that.
+	locals []map[string]string
+	// takes_kwargs records which functions were declared with a `:name [b
+	// default]` parameter. A call site needs it to know whether a keyword in its
+	// arguments is a keyword ARGUMENT or just a keyword value -- `(get conn
+	// :session)` is the second and rewriting it as a bundle is not JavaScript.
+	//
+	// It is order-dependent: a call that textually precedes the definition does not
+	// collapse. That matches how blip itself reads (define before use) and is
+	// recorded rather than worked around.
+	takes_kwargs map[string]bool
 }
 
-// push_locals records names bound by a construct whose scope encloses whatever
-// is emitted next, and returns the depth to hand back to pop_locals.
+// push_local records one binding under its blip name and the identifier that
+// holds it.
+fn (mut e Emitter) push_local(blip_name string, js string) int {
+	mut m := map[string]string{}
+	m[blip_name] = js
+	e.locals << m
+	return e.locals.len
+}
+
 fn (mut e Emitter) push_locals(names []string) int {
-	mut m := map[string]bool{}
+	mut m := map[string]string{}
 	for n in names {
-		m[n] = true
+		m[n] = e.mangle_name(n)
 	}
 	e.locals << m
 	return e.locals.len
@@ -143,15 +162,16 @@ fn (mut e Emitter) pop_locals(depth int) {
 	}
 }
 
-// is_local answers whether a name is bound by an enclosing construct. The blip
-// name is compared, not the mangled one, because that is what the source says.
-fn (e &Emitter) is_local(name string) bool {
+// local_js answers which identifier a name bound by an enclosing construct is
+// held in. The blip name is compared, not the mangled one, because that is what
+// the source says.
+fn (e &Emitter) local_js(name string) ?string {
 	for i := e.locals.len - 1; i >= 0; i-- {
-		if e.locals[i][name] {
-			return true
+		if js := e.locals[i][name] {
+			return js
 		}
 	}
-	return false
+	return none
 }
 
 // ------------------------------------------------------------------ helpers
@@ -315,6 +335,12 @@ fn (mut e Emitter) special(name string, id reader.NodeId, kids []reader.NodeId) 
 		e.emit('${e.value(id)};')
 		return true
 	}
+	// `use` in statement position is the same IIFE followed by a semicolon. Listed
+	// as unsupported until now, so a top-level `use` emitted nothing at all.
+	if name == 'use' {
+		e.emit('${e.value(id)};')
+		return true
+	}
 	if name == 'quote' {
 		e.emit('${e.value(kids[1])};')
 		return true
@@ -416,7 +442,7 @@ fn (mut e Emitter) special(name string, id reader.NodeId, kids []reader.NodeId) 
 // is skipped before the special-form dispatch runs, so a top-level `match` used
 // to emit nothing and look like a silent success.
 const unsupported_forms = ['loop', 'dotimes',
-	'struct', 'use', 'require', 'provide',
+	'struct', 'require', 'provide',
 	'try', 'do', 'defmacro', 'macex', 'macex1', 'as->',
 	'cond->', 'import', 'quasiquote', 'unquote', 'unquote-splicing']
 
@@ -461,8 +487,42 @@ fn (mut e Emitter) named_function(name string, params []reader.NodeId, body []re
 	// statement position.
 	mut destructures := []string{}
 	mut arg := 0
-	for p in params {
+	// `:name [binding default]` is a KEYWORD parameter: the call site names it
+	// with a keyword and may leave it out. JavaScript has no keyword arguments,
+	// so they travel as one trailing object and the function reads it -- which is
+	// a convention both sides have to agree on, so it is written in both places.
+	mut kwargs := []string{}
+	for pi := 0; pi < params.len; pi++ {
+		p := params[pi]
 		d := e.node(p)
+		if d.tag == .kw {
+			// The default lives in the NEXT form, `[binding default]`, and that form
+			// is part of this parameter -- not another one. Iterating with an index is
+			// what makes skipping it possible; a value loop processed the default as a
+			// second parameter and declared its binding twice.
+			if pi + 1 >= params.len {
+				e.refuse('keyword parameter')
+				return
+			}
+			slot := e.kids(params[pi + 1])
+			if slot.len < 2 {
+				e.refuse('keyword parameter')
+				return
+			}
+			bind := e.node(slot[0])
+			if bind.tag != .sym {
+				e.refuse('keyword parameter')
+				return
+			}
+			mut js_default := e.test_of(slot[1])
+			if js_default.starts_with('thunk(') {
+				js_default = js_default[6..js_default.len - 1]
+			}
+			kwargs << 'const ${e.mangle_name(bind.value)} = (__blip_kw && __blip_kw[${json_str(d.value)}] !== undefined) ? __blip_kw[${json_str(d.value)}] : ${js_default};'
+			param_names << bind.value
+			pi++
+			continue
+		}
 		if d.tag == .sym {
 			ps << e.mangle_name(d.value)
 			param_names << d.value
@@ -489,6 +549,10 @@ fn (mut e Emitter) named_function(name string, params []reader.NodeId, body []re
 		arg++
 	}
 	_ = arg
+	if kwargs.len > 0 {
+		ps << '__blip_kw'
+		e.takes_kwargs[name] = true
+	}
 	// The NAME goes through the same mangling as every other identifier, here
 	// rather than at each call site, so a definition and a call cannot disagree.
 	// Without this, `count-down` was defined with its hyphen while every call
@@ -499,6 +563,9 @@ fn (mut e Emitter) named_function(name string, params []reader.NodeId, body []re
 	e.emit('function${head}(${ps.join(', ')}) {')
 	e.depth++
 	for line in destructures {
+		e.emit(line)
+	}
+	for line in kwargs {
 		e.emit(line)
 	}
 	// Every parameter is in scope for the whole body, and a parameter named
@@ -595,11 +662,29 @@ fn (mut e Emitter) emit_let(kind string, kids []reader.NodeId) {
 		return
 	}
 	bindings := e.kids(kids[1])
-	body := kids[2..]
+mut body := kids[2..]
+	// `(let NAME VALUE body...)` is the same thing as `(let ([NAME VALUE])
+	// body...)`, and std.lip uses the short form everywhere -- every one of
+	// parse-in, lookup-sym, validate and connect is written that way. Reading
+	// kids[1] as a binding LIST took its children, which a symbol has none of,
+	// so the bindings were empty and the function body was emitted with nothing
+	// bound: `parse-in` returned null for every input and nothing said so.
+	mut plain := false
+	if e.node(kids[1]).tag == .sym && kids.len >= 4 {
+		plain = true
+		body = kids[3..]
+	}
 	if kind == 'let' {
 		mut names := []string{}
 		mut vals := []string{}
+		if plain {
+			names << e.mangle_name(e.node(kids[1]).value)
+			vals << e.test_of(kids[2])
+		}
 		for b in bindings {
+			if plain {
+				break
+			}
 			inner := e.kids(b)
 			if inner.len < 2 {
 				e.refuse('let binding')
@@ -613,7 +698,7 @@ fn (mut e Emitter) emit_let(kind string, kids []reader.NodeId) {
 				return
 			}
 			names << e.mangle_name(e.node(inner[0]).value)
-			vals << e.value(inner[1])
+			vals << e.test_of(inner[1])
 		}
 		e.emit('((${names.join(', ')}) => {')
 		e.depth++
@@ -870,6 +955,12 @@ if (name == 'fn' || name == 'lambda') && kids.len >= 2 {
 		bindings := e.kids(kids[1])
 		mut names := []string{}
 		mut vals := []string{}
+		// `(let NAME VALUE body...)`, the short form std.lip is written in. The
+		// bindings slot holds a symbol, whose children are none, so this reached
+		// the pair loop with nothing and bound nothing.
+		if e.node(kids[1]).tag == .sym && kids.len >= 4 {
+			return '((${e.mangle_name(e.node(kids[1]).value)}) => ${e.value(kids.last())})(${e.test_of(kids[2])})'
+		}
 		mut pats := []Pat{}
 		mut has_pattern := false
 		for b in bindings {
@@ -889,11 +980,11 @@ if (name == 'fn' || name == 'lambda') && kids.len >= 2 {
 				}
 				pats << p
 				has_pattern = true
-				vals << e.value(inner[1])
+				vals << e.test_of(inner[1])
 				continue
 			}
 			names << e.mangle_name(e.node(inner[0]).value)
-			vals << e.value(inner[1])
+			vals << e.test_of(inner[1])
 		}
 		last := e.value(kids.last())
 		if !has_pattern {
@@ -954,11 +1045,11 @@ if (name == 'fn' || name == 'lambda') && kids.len >= 2 {
 	}
 	if name == 'when' && kids.len >= 2 {
 		body := kids[2..].map(e.value).join(', ')
-		return '(blip_truthy(${e.value(kids[1])}) ? (${body}) : null)'
+		return '(blip_truthy(${e.test_of(kids[1])}) ? (${body}) : null)'
 	}
 	if name == 'unless' && kids.len >= 2 {
 		body := kids[2..].map(e.value).join(', ')
-		return '(blip_truthy(${e.value(kids[1])}) ? null : (${body}))'
+		return '(blip_truthy(${e.test_of(kids[1])}) ? null : (${body}))'
 	}
 	// `match` for the patterns that are unambiguous: a literal, `_`, or a bare
 	// symbol (which BINDS rather than compares -- `(match 5 [x 'bound])` gives
@@ -970,6 +1061,9 @@ if (name == 'fn' || name == 'lambda') && kids.len >= 2 {
 	// matches several subjects at once, which is a different shape entirely.
 	if name == 'match' || name == 'match*' {
 		return e.match_expr(kids)
+	}
+	if name == 'use' && kids.len >= 2 {
+		return e.use_expr(kids)
 	}
 	// The threading macros. `->` puts the value FIRST in every step, `->>` puts it
 	// LAST, and a bare symbol step is a call with the value alone:
@@ -1473,7 +1567,7 @@ fn (mut e Emitter) pattern_let(bindings []reader.NodeId, body []reader.NodeId) {
 			e.refuse('let binding')
 			return
 		}
-		vals << e.value(inner[1])
+		vals << e.test_of(inner[1])
 		p := e.binding_pattern(inner[0])
 		if !p.ok {
 			return
@@ -1630,7 +1724,105 @@ fn (mut e Emitter) match_expr(kids []reader.NodeId) string {
 	return '(() => {\n${lines.join('\n')}\n})()'
 }
 
-// collection emits the three non-list literal forms: `{:a 1}`, `@(1 2 3)` and
+// test_of emits a value in ORDINARY position, for a place whose result is
+// CONSUMED rather than returned: a `cond` test, a `when` test, a `let` binding
+// value.
+//
+// It matters because a test is wrapped in `blip_truthy`, which does not drive a
+// thunk -- so a test emitted in tail position handed it a thunk object, always
+// compared as true, and every `cond` took its first branch. A binding value
+// emitted in tail position was a thunk too, so the binding held a function and
+// the first use of it failed somewhere else entirely.
+fn (mut e Emitter) test_of(id reader.NodeId) string {
+	saved := e.tail
+	e.tail = 0
+	v := e.value(id)
+	e.tail = saved
+	return v
+}
+
+// use_expr emits `(use (f args...) body...)` as one IIFE.
+//
+// The rules, from machine/mod.v's `.use_k`:
+//
+//   - the CALL runs, and an (err _) result SKIPS the body and becomes the value
+//     of the whole `use`. That is what makes `use` safe to chain: nothing after a
+//     failure sees a half-bound name.
+//   - a single value binds to the CALLEE's name -- `(use (connect "h") ...)`
+//     binds `conn`, which is what makes the stacked form read as four flat lines.
+//   - several values bind positionally to r1, r2, ... because a body you can read
+//     without counting parens is the entire point.
+//
+// How MANY names to bind is not knowable when the module is emitted, which is why
+// this is a continuation in the machine and not a transform: a transform would
+// have to guess from the number of body forms. So the emitted body declares a
+// window of rN names and reads out of the result. That window (use_arity_max) is
+// the one honest limitation here -- a call returning more values than that binds
+// the first windowful and drops the rest, rather than emitting a name nobody can
+// predict. The alternative, emitting the body twice for the one-value and
+// many-value paths, is exponential in the nesting: the example stacks four
+// levels.
+const use_arity_max = 8
+
+fn (mut e Emitter) use_expr(kids []reader.NodeId) string {
+	if kids.len < 2 {
+		e.refuse('use')
+		return 'null'
+	}
+	e.gensym++
+	tag := '__blip_use${e.gensym}'
+	// The callee's name is the head symbol of the call form, or r1 when the form is
+	// not a named call -- machine/mod.v's callee_name.
+	mut callee := 'r1'
+	call_kids := e.kids(kids[1])
+	if e.node(kids[1]).tag == .sym {
+		callee = e.mangle_name(e.node(kids[1]).value)
+	} else if call_kids.len > 0 && e.node(call_kids[0]).tag == .sym {
+		callee = e.mangle_name(e.node(call_kids[0]).value)
+	}
+	// The body is evaluated under the bindings, so its names have to be in scope
+	// before any of it is emitted. The callee's binding gets its OWN identifier:
+	// it is very often the name of the function being called, and a `let` of that
+	// name in the same block shadows the call itself.
+	slot := '__blip_use${e.gensym}_v'
+	m := e.push_local(callee, slot)
+	mut names := []string{}
+	for i in 0..use_arity_max {
+		names << 'r${i + 1}'
+	}
+	e.push_locals(names)
+	body := e.use_body(kids[2..])
+	e.pop_locals(m)
+
+	mut decls := []string{}
+	decls << 'const __blip_use${e.gensym} = ${e.value(kids[1])};'
+	decls << 'if (!is_result(__blip_use${e.gensym}, "ok")) { return __blip_use${e.gensym}; }'
+	decls << 'const __blip_use${e.gensym}i = unvec(__blip_use${e.gensym});'
+	decls << 'let ${slot} = __blip_use${e.gensym}i.length > 1 ? __blip_use${e.gensym}i[1] : null;'
+	for i in 0..use_arity_max {
+		decls << 'let r${i + 1} = __blip_use${e.gensym}i.length > ${i + 1} ? __blip_use${e.gensym}i[${i + 1}] : null;'
+	}
+	decls << 'return ${body};'
+	return '(() => {\n${decls.join('\n')}\n})()'
+}
+
+// use_body emits the body forms, the last of which is the value. A ONE-form body
+// is that form and not a sequence: `(use (parse-in "x") (+ 1 2))` is 3, and the
+// clause bodies used to assume `begin`, which destructured every bare list body
+// into its pieces and answered something else.
+fn (mut e Emitter) use_body(forms []reader.NodeId) string {
+	if forms.len == 0 {
+		return 'null'
+	}
+	if forms.len == 1 {
+		return e.value(forms[0])
+	}
+	mut parts := []string{}
+	for f in forms {
+		parts << '(${e.value(f)})'
+	}
+	return parts.join(', ')
+}
 // `@{:n 0}`. A table and a buffer both take keyword/value PAIRS, so their
 // children alternate, while an array takes plain values -- and blip prints an
 // array as `[1 2 3]`, which is the VECTOR spelling, so an array literal is
@@ -1757,7 +1949,12 @@ fn (mut e Emitter) cond_expr(kids []reader.NodeId) string {
 	mut out := 'null'
 	for i := kids.len - 1; i >= 1; i-- {
 		clause := e.node(kids[i])
-		if clause.tag != .list {
+		// A clause is written `[test body]`, and the reader tags `[...]` as a
+		// VECTOR -- not a list. Requiring `.list` here skipped every clause, so
+		// `cond` answered nil for everything, silently: every stdlib function
+		// written with a cond (parse-in, lookup-sym, validate, connect) returned
+		// null for every input and no gate noticed.
+		if clause.tag !in [.list, .vector] {
 			continue
 		}
 		parts := e.kids(kids[i])
@@ -1767,7 +1964,19 @@ fn (mut e Emitter) cond_expr(kids []reader.NodeId) string {
 		test := e.node(parts[0])
 		is_else := test.tag == .sym && test.value == 'else'
 		val := parts[1..].map(e.value).join(', ')
-		cond_str := if is_else { 'true' } else { 'blip_truthy(${e.value(parts[0])})' }
+		// The TEST is not a tail call: its value is consumed by blip_truthy, which
+		// does not drive a thunk -- so a test emitted in tail position would be
+		// handed a thunk object, always compare as true, and every `cond` would
+		// take its first branch. The clause VALUE does inherit tail position,
+		// because it is what the whole `cond` produces.
+		mut cond_str := 'true'
+		if !is_else {
+			saved := e.tail
+			e.tail = 0
+			probe := e.value(parts[0])
+			e.tail = saved
+			cond_str = 'blip_truthy(${probe})'
+		}
 		out = '(${cond_str} ? (${val}) : ${out})'
 	}
 	return out
@@ -1834,10 +2043,37 @@ fn (mut e Emitter) application(id reader.NodeId, kids []reader.NodeId) string {
 	saved_tail := e.tail
 	e.tail = 0
 	mut parts := []string{}
+	// Keyword arguments collapse into ONE trailing object, which is the other half
+	// of the convention named_function writes: `(f x :k v)` is `f(x, {k: v})` and
+	// a `:name [b default]` parameter reads it. Everything before the first
+	// keyword stays positional. Without this, `:user` and its value were passed as
+	// two ordinary arguments and landed in the wrong parameters.
+	//
+	// Only for a function that TAKES keyword parameters. A keyword is also an
+	// ordinary value -- `(get conn :session)` -- and rewriting that call produced
+	// `blip.get(conn, {"session"})`, which is not JavaScript.
+	mut kwparts := []string{}
+	mut in_kwargs := false
+	head_name := if e.node(kids[0]).tag == .sym { e.node(kids[0]).value } else { '' }
+	collapses := e.takes_kwargs[head_name]
 	for a in kids[1..] {
-		parts << e.value(a)
+		d := e.node(a)
+		if d.tag == .kw && collapses {
+			in_kwargs = true
+			kwparts << json_str(d.value)
+			continue
+		}
+		v := e.value(a)
+		if in_kwargs && d.tag != .kw {
+			kwparts[kwparts.len - 1] = kwparts[kwparts.len - 1] + ': ' + v
+			continue
+		}
+		parts << v
 	}
 	e.tail = saved_tail
+	if kwparts.len > 0 {
+		parts << '{${kwparts.join(', ')}}'
+	}
 	// A call in tail position returns a thunk; any other call is DRIVEN. That
 	// single choice is what stands between a backend that can loop a million
 	// times and one that dies on the first thousand.
@@ -2223,8 +2459,8 @@ fn (mut e Emitter) symbol(s string) string {
 	// BEFORE the prim_names routing: `rest`, `first`, `last`, `count`, `string`,
 	// `symbol`, `vector` and `zero` are all primitives AND all ordinary names for
 	// someone to bind.
-	if e.is_local(s) {
-		return e.mangle_name(s)
+	if js := e.local_js(s) {
+		return js
 	}
 	if s in prim_names {
 		return 'blip.${mangle(s)}'

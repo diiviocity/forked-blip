@@ -19,8 +19,11 @@ const blip = {
     for (let i = 1; i < a.length; i++) if (!blip_equal(a[i - 1], a[i])) return false;
     return true;
   },
+  // `print` joins its arguments with SPACES onto ONE line. Printing each on its
+  // own line looked equivalent until a program printed two, which is how
+  // `(print "parsed:" r1 "=" r2)` became four lines here and one there.
   print: (...a) => {
-    for (const x of a) console.log(blip_show(x));
+    console.log(a.map(blip_show).join(" "));
     return null;
   },
   missing: (...a) => {
