@@ -1944,6 +1944,26 @@ fn mangle(name string) string {
 		// forms go through the runtime instead of a bare identifier.
 		'string->number' { return 'string_number' }
 		'number->string' { return 'number_string' }
+		// The Result combinators. These are MACHINE builtins, not prims
+		// (machine/mod.v), which is why no `p['ok']` entry exists to find: a
+		// search of the prims table turns up nothing, and the emitted call to a
+		// bare `ok` is an identifier nothing defines.
+		'ok' { return 'ok' }
+		'err' { return 'err' }
+		'ok?' { return 'ok_q' }
+		'err?' { return 'err_q' }
+		'ok-value' { return 'ok_value' }
+		'err-value' { return 'err_value' }
+		'unwrap-or' { return 'unwrap_or' }
+		'flatten-result' { return 'flatten_result' }
+		'all-results' { return 'all_results' }
+		'map-result' { return 'map_result' }
+		'try-result' { return 'try_result' }
+		'lazy-map-result' { return 'lazy_map_result' }
+		'lazy-unwrap' { return 'lazy_unwrap' }
+		'assert' { return 'assert' }
+		'any?' { return 'any_q' }
+		'every?' { return 'every_q' }
 		else {
 			return 'p_' + name.replace('-', '_').replace('?', '_q').replace('!', '_b')
 		}
@@ -2026,6 +2046,22 @@ const prim_names = {
 		'format':         true
 		'string->number': true
 		'number->string': true
+		'ok':             true
+		'err':            true
+		'ok?':            true
+		'err?':           true
+		'ok-value':       true
+		'err-value':      true
+		'unwrap-or':      true
+		'flatten-result': true
+		'all-results':    true
+		'map-result':     true
+		'try-result':     true
+		'lazy-map-result': true
+		'lazy-unwrap':    true
+		'assert':         true
+		'any?':           true
+		'every?':         true
 }
 
 // stmt emits a form as a statement, and drops a trailing `;` when the form is

@@ -264,6 +264,88 @@ const blip = {
   // `letrec` bindings in examples/01_basics.lip -- those shadow them locally,
   // and the top-level `(filter even? ...)` uses the primitive. An emitter with
   // no binding for them emits a call to a name nobody defined.
+  // ---- Result -------------------------------------------------------------
+  //
+  // A Result is a plain list whose head is the symbol `ok` or `err`, so it prints
+  // as `(ok 42)` and compares structurally. It is not a tagged value here, which
+  // matches blip: machine/mod.v says a dedicated tag would make every result a
+  // special case in the printer, in `=` and in the pattern matcher, for no gain.
+  ok: (...vals) => [blip.sym("ok")].concat(vals),
+  err: (...vals) => [blip.sym("err")].concat(vals),
+  ok_q: (r) => is_result(r, "ok"),
+  err_q: (r) => is_result(r, "err"),
+  // `ok-value` and `err-value` answer the value INSIDE, and refuse a result of the
+  // other kind by name -- the message says what it was, because "not a result"
+  // sends the reader looking for a different mistake.
+  ok_value: (r) => result_inner(r, "ok", "ok-value"),
+  err_value: (r) => result_inner(r, "err", "err-value"),
+  // `unwrap-or` evaluates its default on EVERY call, because every argument in a
+  // Lisp is evaluated eagerly. That is the trap the lazy name exists to avoid.
+  unwrap_or: (r, dflt) => {
+    if (!is_result(r, "ok")) return tramp(dflt);
+    const items = unvec(r);
+    return items.length > 1 ? items[1] : null;
+  },
+  // One level only: ok(ok(1)) is ok(1), and a deeper nest is a bug in the caller
+  // rather than something to normalise silently. The value is the INNER result,
+  // not a rebuilt pair -- rebuilding kept the outer `ok` and handed the inner
+  // value straight through, so one level was peeled and then put back.
+  flatten_result: (r) => {
+    if (is_result(r, "ok")) {
+      const items = unvec(r);
+      if (items.length > 1 && (is_result(items[1], "ok") || is_result(items[1], "err"))) {
+        return items[1];
+      }
+    }
+    return r;
+  },
+  // The FIRST error wins: returning the last would make the result depend on
+  // evaluation order in a way nobody can see.
+  all_results: (...rs) => {
+    const vals = [];
+    for (const r of rs) {
+      if (!is_result(r, "ok")) return r;
+      const items = unvec(r);
+      if (items.length > 1) vals.push(items[1]);
+    }
+    return [blip.sym("ok"), blip.vec(...vals)];
+  },
+  // map-result, try-result and lazy-map-result are ONE function in blip:
+  // result_combinator only special-cases lazy-unwrap, so all three map the inner
+  // value and pass an (err _) straight through. The names differ because the
+  // intention differs, and a lazy name on a function that is not lazy would be
+  // the lie -- so they are emitted as the same function, not three similar ones
+  // that drift.
+  map_result: (r, f) => map_result_go(r, f),
+  try_result: (r, f) => map_result_go(r, f),
+  lazy_map_result: (r, f) => map_result_go(r, f),
+  // lazy-unwrap is the one that differs: on an (err _) it RUNS the thunk, which is
+  // the entire reason it takes a function.
+  lazy_unwrap: (r, f) => {
+    if (!is_result(r, "ok")) return tramp(f());
+    const items = unvec(r);
+    return items.length > 1 ? items[1] : null;
+  },
+  // `assert` is executable documentation, and the message is REQUIRED: an
+  // assertion failure that only says "false" tells a reader nothing about which
+  // of four hundred promises broke.
+  assert: (test, message) => {
+    if (!blip_truthy(tramp(test))) {
+      throw new Error("assertion failed: " + blip_show(tramp(message)));
+    }
+    return null;
+  },
+  // `any?` and `every?` take the PREDICATE FIRST: `(any? even? [1 3 4])`. Measured,
+  // because the other order is a type error that names the closure rather than
+  // the argument positions.
+  any_q: (f, xs) => {
+    const items = unvec(xs);
+    return Array.isArray(items) ? items.some((x) => blip_truthy(tramp(f(x)))) : false;
+  },
+  every_q: (f, xs) => {
+    const items = unvec(xs);
+    return Array.isArray(items) ? items.every((x) => blip_truthy(tramp(f(x)))) : true;
+  },
   even_q: (n) => unvec(n) % 2 === 0,
   odd_q: (n) => unvec(n) % 2 !== 0,
 };
@@ -473,6 +555,39 @@ function seq_items(x) {
 // as `(1 2 3)` and the elements are in that order either way.
 function is_pair(x) {
   return Array.isArray(unvec(x)) && unvec(x).length >= 2;
+}
+
+// is_result reports whether a value is a `(ok ...)` or `(err ...)`: a sequence
+// whose FIRST element is the bare symbol of that kind. blip checks the same
+// thing in is_result_of, on the pair's car.
+function is_result(v, kind) {
+  const items = unvec(v);
+  return Array.isArray(items) && items.length > 0
+    && items[0] && items[0].blip_sym !== undefined && items[0].blip_sym === kind;
+}
+
+// result_inner is `ok-value` / `err-value`: the value at position 1, or a refusal
+// naming the kind it actually was.
+function result_inner(v, kind, name) {
+  if (!is_result(v, kind)) {
+    const items = unvec(v);
+    const actual = Array.isArray(items) && items.length > 0
+      && items[0] && items[0].blip_sym !== undefined ? items[0].blip_sym : "not-a-result";
+    throw new Error(name + ": " + blip_show(v) + " is not a (" + kind
+      + " ...), it is a " + actual);
+  }
+  const items = unvec(v);
+  return items.length > 1 ? items[1] : null;
+}
+
+// map_result_go is the one function behind map-result, try-result and
+// lazy-map-result. It cannot live in the blip object because those three
+// properties reference it while the object literal is still being built.
+function map_result_go(r, f) {
+  if (!is_result(r, "ok")) return r;
+  const items = unvec(r);
+  const v = tramp(f(items.length > 1 ? items[1] : null));
+  return is_result(v, "err") ? v : blip.ok(v);
 }
 
 function blip_show(x) {
