@@ -254,6 +254,13 @@ fn (mut e Emitter) special(name string, id reader.NodeId, kids []reader.NodeId) 
 			return true
 		}
 	}
+	// A `match` in statement position is the expression followed by a semicolon,
+	// the same rule `->` follows. Without this it fell through to the call path,
+	// which emitted `match(...)` -- a call to a name nothing defines.
+	if name == 'match' || name == 'match*' {
+		e.emit('${e.value(id)};')
+		return true
+	}
 	if name == 'quote' {
 		e.emit('${e.value(kids[1])};')
 		return true
@@ -350,7 +357,11 @@ fn (mut e Emitter) special(name string, id reader.NodeId, kids []reader.NodeId) 
 
 // unsupported_forms are blip special forms this emitter does not compile yet.
 // Everything NOT in this list and not handled above is a plain function call.
-	const unsupported_forms = ['loop', 'dotimes', 'match', 'match*',
+// `match` and `match*` are no longer here: they compile, and the statement path
+// needs them GONE from this list to reach `special` at all -- a name listed here
+// is skipped before the special-form dispatch runs, so a top-level `match` used
+// to emit nothing and look like a silent success.
+const unsupported_forms = ['loop', 'dotimes',
 	'struct', 'use', 'require', 'provide',
 	'try', 'do', 'defmacro', 'macex', 'macex1', 'as->',
 	'cond->', 'import', 'quasiquote', 'unquote', 'unquote-splicing']
@@ -388,14 +399,39 @@ fn (mut e Emitter) emit_define(kids []reader.NodeId) {
 // value of its last form, which is how blip decides it too.
 fn (mut e Emitter) named_function(name string, params []reader.NodeId, body []reader.NodeId) {
 	mut ps := []string{}
+	// A parameter that is a PATTERN destructures on entry rather than being
+	// refused: `(define (dist (struct Point x: px y: py)) ...)`. The JavaScript
+	// parameters stay plain, and the destructuring is emitted as a statement at
+	// the top of the body -- which is safe here because a function body is a
+	// statement position.
+	mut destructures := []string{}
+	mut arg := 0
 	for p in params {
 		d := e.node(p)
-		if d.tag != .sym {
-			e.refuse('non-symbol parameter')
+		if d.tag == .sym {
+			ps << e.mangle_name(d.value)
+			arg++
+			continue
+		}
+		e.gensym++
+		raw := '__blip_arg${e.gensym}'
+		ps << raw
+		bp := e.binding_pattern(p)
+		if !bp.ok {
 			return
 		}
-		ps << e.mangle_name(d.value)
+		tag := '__blip_d${e.gensym}'
+		// No braces around these: the names they declare belong to the function
+		// body, and a block would scope them to the block -- which is how `px`
+		// became undefined in the body of `dist`.
+		destructures << 'const ${tag} = pat_match(${bp.js}, ${raw});'
+		destructures << 'if (${tag} === "no") { throw new Error("blip: ${name}: parameter does not match its pattern"); }'
+		for nm in bp.names {
+			destructures << 'const ${nm} = ${tag}["${nm}"];'
+		}
+		arg++
 	}
+	_ = arg
 	// The NAME goes through the same mangling as every other identifier, here
 	// rather than at each call site, so a definition and a call cannot disagree.
 	// Without this, `count-down` was defined with its hyphen while every call
@@ -405,6 +441,9 @@ fn (mut e Emitter) named_function(name string, params []reader.NodeId, body []re
 	head := if js_name == '' { '' } else { ' ' + js_name }
 	e.emit('function${head}(${ps.join(', ')}) {')
 	e.depth++
+	for line in destructures {
+		e.emit(line)
+	}
 	// The LAST body form is the function's value, so it is in tail position and
 	// everything before it is not. That is the whole rule.
 	for i, b in body {
@@ -455,6 +494,43 @@ fn (mut e Emitter) emit_let(kind string, kids []reader.NodeId) {
 		e.refuse('let')
 		return
 	}
+	// `(let assert PATTERN VALUE body...)` is a match with no other clause, so a
+	// mismatch is a hard error naming the pattern rather than a nil to carry. The
+	// machine spells it transform_let_assert; the emitter matches directly.
+	if e.node(kids[1]).tag == .sym && e.node(kids[1]).value == 'assert' {
+		if kids.len < 4 {
+			e.refuse('let assert')
+			return
+		}
+		bk := e.kids(kids[2])
+		if bk.len < 2 {
+			e.refuse('let assert')
+			return
+		}
+		p := e.pattern(bk[0])
+		if !p.ok {
+			return
+		}
+		e.gensym++
+		tag := '__blip_a${e.gensym}'
+		e.emit('(() => {')
+		e.emit('const ${tag} = pat_match(${p.js}, ${e.value(bk[1])});')
+		e.emit('if (${tag} === "no") { throw new Error("blip: let assert: value does not match its pattern"); }')
+		for nm in p.names {
+			e.emit('const ${nm} = ${tag}["${nm}"];')
+		}
+		e.depth++
+		for i, b in kids[3..] {
+			if i == kids.len - 4 {
+				e.emit('return ${e.value(b)};')
+			} else {
+				e.stmt(b)
+			}
+		}
+		e.depth--
+		e.emit('})();')
+		return
+	}
 	bindings := e.kids(kids[1])
 	body := kids[2..]
 	if kind == 'let' {
@@ -462,8 +538,15 @@ fn (mut e Emitter) emit_let(kind string, kids []reader.NodeId) {
 		mut vals := []string{}
 		for b in bindings {
 			inner := e.kids(b)
-			if inner.len < 2 || e.node(inner[0]).tag != .sym {
+			if inner.len < 2 {
 				e.refuse('let binding')
+				return
+			}
+			if e.node(inner[0]).tag != .sym {
+				// A pattern binding, `([(list h t) '(1 2)])`. It cannot be a
+				// destructuring arrow parameter -- there is no name to bind -- so it
+				// becomes an IIFE that matches and then declares the names.
+				e.pattern_let(bindings, body)
 				return
 			}
 			names << e.mangle_name(e.node(inner[0]).value)
@@ -599,7 +682,13 @@ fn (mut e Emitter) value(id reader.NodeId) string {
 		.char { return '"${escape(rune(d.i))}"' }
 		.str { return '"${escape_all(d.value)}"' }
 		.sym { return e.symbol(d.value) }
-		.kw { return '"${escape_all(d.value)}"' }
+		// A keyword datum is a KEYWORD, not a string: `:dog` is a value the printer
+	// writes `:dog`, and `{:kind :dog}` stores one. It used to emit as a bare
+	// string, which is invisible for a table KEY -- which is why it survived
+	// until a keyword appeared in a table VALUE and printed as `"dog"` where
+	// blip prints `:dog`. Lookups normalise the key, so `blip.get(t, :a)` and
+	// `blip.get(t, "a")` reach the same entry.
+	.kw { return 'blip.kw("${escape_all(d.value)}")' }
 		.list {
 			return e.application(id, kids_of(e, id))
 		}
@@ -689,20 +778,78 @@ fn (mut e Emitter) expression_form(name string, kids []reader.NodeId) ?string {
 		return '((${ps.join(', ')}) => { return ${e.value(kids.last())}; })'
 	}
 	if (name == 'let' || name == 'let*' || name == 'letrec') && kids.len >= 3 {
+		// `(let assert PATTERN VALUE body...)` is a match with no other clause: a
+		// mismatch is a hard error naming the pattern. It arrives here as `let`
+		// with `assert` in the bindings slot, so it is split off before the
+		// bindings are read as a list -- otherwise `assert` was treated as a
+		// binding name and the body referenced names nothing had declared.
+		if e.node(kids[1]).tag == .sym && e.node(kids[1]).value == 'assert' && kids.len >= 4 {
+			bk := e.kids(kids[2])
+			if bk.len < 2 {
+				e.refuse('let assert')
+				return 'null'
+			}
+			p := e.pattern(bk[0])
+			if !p.ok {
+				return 'null'
+			}
+			e.gensym++
+			tag := '__blip_la${e.gensym}'
+			mut lines := []string{}
+			lines << 'const ${tag} = pat_match(${p.js}, ${e.value(bk[1])});'
+			lines << 'if (${tag} === "no") { throw new Error("blip: let assert: value does not match its pattern"); }'
+			for nm in p.names {
+				lines << 'const ${nm} = ${tag}["${nm}"];'
+			}
+			lines << 'return ${e.value(kids.last())};'
+			return '(() => {\n${lines.join('\n')}\n})()'
+		}
 		bindings := e.kids(kids[1])
 		mut names := []string{}
 		mut vals := []string{}
+		mut pats := []Pat{}
+		mut has_pattern := false
 		for b in bindings {
 			inner := e.kids(b)
-			if inner.len < 2 || e.node(inner[0]).tag != .sym {
+			if inner.len < 2 {
 				e.refuse('let binding')
 				return 'null'
+			}
+			if e.node(inner[0]).tag != .sym {
+				// A pattern binding in EXPRESSION position. The statement path
+				// emits an IIFE as statements; here it has to be one expression,
+				// because `(print (let ([(list a b) xs]) (+ a b)))` is the shape
+				// that reached this code.
+				p := e.binding_pattern(inner[0])
+				if !p.ok {
+					return 'null'
+				}
+				pats << p
+				has_pattern = true
+				vals << e.value(inner[1])
+				continue
 			}
 			names << e.mangle_name(e.node(inner[0]).value)
 			vals << e.value(inner[1])
 		}
 		last := e.value(kids.last())
-		return '((${names.join(', ')}) => ${last})(${vals.join(', ')})'
+		if !has_pattern {
+			return '((${names.join(', ')}) => ${last})(${vals.join(', ')})'
+		}
+		e.gensym++
+		mut lines := []string{}
+		for i, p in pats {
+			tag := '__blip_e${e.gensym}${i}'
+			lines << 'const ${tag} = pat_match(${p.js}, ${vals[i]});'
+			for nm in p.names {
+				lines << 'const ${nm} = ${tag} ? ${tag}["${nm}"] : null;'
+			}
+		}
+		if names.len > 0 {
+			lines << 'const ${names.join(', ')} = ${vals[pats.len..].join(', ')};'
+		}
+		lines << 'return ${last};'
+		return '(() => {\n${lines.join('\n')}\n})()'
 	}
 	if name == 'if' {
 		if kids.len < 3 {
@@ -758,7 +905,7 @@ fn (mut e Emitter) expression_form(name string, kids []reader.NodeId) ?string {
 	// predicate patterns -- is refused by name, because guessing at their
 	// meaning is worse than reporting the gap. `match*` is refused wholesale: it
 	// matches several subjects at once, which is a different shape entirely.
-	if name == 'match' {
+	if name == 'match' || name == 'match*' {
 		return e.match_expr(kids)
 	}
 	// The threading macros. `->` puts the value FIRST in every step, `->>` puts it
@@ -855,67 +1002,551 @@ const literal_tags = [reader.DatumTag.int, .float, .str, .char, .bool, .nil, .kw
 // A bare symbol in a pattern is a BINDING, not a comparison -- that is the one
 // rule that surprises everyone, and it is why `(match 5 [x 'bound])` answers
 // `bound` rather than falling through. `_` matches anything without binding.
+// pattern compiles a blip pattern into the tagged-array form `pat_match` reads.
+// It returns false when the pattern cannot be compiled, and says why through
+// `refuse`.
+//
+// The rules are machine/match.v's, read rather than reinvented:
+//   _ / else        ["wc"]
+//   a bare symbol   ["sym", name]              binds the whole subject
+//   a literal       ["lit", value]             nil included, and nil-as-pattern
+//                                                means the EMPTY SEQUENCE
+//   (list p ...)    ["list", p...]              and the same for (vector p...)
+//   (cons p t)      ["cons", p, t]
+//   {:k p}          ["table", "k", p...]
+//   (struct N f: p) ["struct", "N", "f", p...]
+//   (and p ...)     ["and", p...]
+//   (or p ...)      ["or", p...]
+//   (f a ...)       ["pred", f, a...]          f is subject-first, and only
+//                                                for the names match.v lists
+//   (a b ...)       positional, the headless form match* produces
+//
+// A pattern is COMPILED rather than re-interpreted on every call: the shape is
+// fixed when the module is emitted, so the runtime walks data instead of
+// re-reading syntax, and a mistake in one rule shows up as one broken pattern
+// shape rather than a slow program.
+// Pat is a compiled pattern: the JavaScript expression `pat_match` reads, and
+// the names it binds. Only the emitter knows the names -- the runtime collects
+// them into an object -- so they travel back with the compiled form.
+struct Pat {
+	js    string
+	names []string
+	ok    bool
+}
+
+fn pat(js string, names []string) Pat {
+	// Names are made UNIQUE here, once, because a pattern may bind the same name
+	// twice -- `(nil nil)` in 03_match's match* does exactly that -- and blip's
+	// frame defines a name once no matter how many bindings mention it. Emitting
+	// `const nil` twice in one block is a JavaScript SyntaxError, so the file
+	// would not parse at all.
+	mut uniq := []string{}
+	for n in names {
+		if n !in uniq {
+			uniq << n
+		}
+	}
+	return Pat{
+		js:    js
+		names: uniq
+		ok:    true
+	}
+}
+
+fn bad_pat() Pat {
+	return Pat{}
+}
+
+// pattern compiles a blip pattern into the tagged-array form `pat_match` reads.
+//
+// The rules are machine/match.v's, read rather than reinvented:
+//   _ / else        ["wc"]
+//   a bare symbol   ["sym", name]              binds the whole subject
+//   a literal       ["lit", value]             and nil-as-pattern, which match.v
+//                                                reads as the EMPTY sequence
+//   (list p ...)    ["list", p...]              (vector p...) is the same shape
+//   (cons p t)      ["cons", p, t]
+//   {:k p}          ["table", "k", p...]
+//   (struct N f: p) ["struct", "N", "f", p...]
+//   (and p ...)     ["and", p...]
+//   (or p ...)      ["or", p...]
+//   (f a ...)       ["pred", f, a...]          subject first, and only for the
+//                                                names match.v lists
+//   (a b ...)       positional, the headless form `match*` produces
+//
+// A pattern is COMPILED once, when the module is emitted, rather than re-read on
+// every match: the shape is fixed by then, so a mistake in one rule is one
+// broken pattern shape instead of a slow program.
+fn (mut e Emitter) pattern(id reader.NodeId) Pat {
+	d := e.node(id)
+	match d.tag {
+		.sym {
+			if d.value == '_' || d.value == 'else' {
+				return pat('["wc"]', [])
+			}
+			return pat('["sym", ${json_str(e.mangle_name(d.value))}]',
+				[e.mangle_name(d.value)])
+		}
+		.nil {
+			return pat('["lit", null]', [])
+		}
+		.int, .float, .str, .bool, .char, .rat, .kw {
+			return pat('["lit", ${e.value(id)}]', [])
+		}
+		.table, .array, .buffer {
+			kids := e.kids(id)
+			mut parts := ['"table"']
+			mut names := []string{}
+			mut i := 0
+			for i + 1 < kids.len {
+				k := e.node(kids[i])
+				if k.tag != .kw {
+					e.refuse('table pattern')
+					return bad_pat()
+				}
+				sub := e.pattern(kids[i + 1])
+				if !sub.ok {
+					return bad_pat()
+				}
+				parts << json_str(k.value)
+				parts << sub.js
+				names << sub.names
+				i += 2
+			}
+			return pat('[${parts.join(', ')}]', names)
+		}
+		.list, .vector {
+			return e.sequence_pattern(e.kids(id))
+		}
+		else {
+			e.refuse('pattern')
+			return bad_pat()
+		}
+	}
+}
+
+// sequence_pattern compiles a list-shaped pattern, dispatching on its head the
+// way match_list_at does. An empty pattern is the empty sequence, and a head
+// that is not a symbol is the positional form a match* clause becomes.
+fn (mut e Emitter) sequence_pattern(kids []reader.NodeId) Pat {
+	if kids.len == 0 {
+		return pat('["lit", null]', [])
+	}
+head := e.node(kids[0])
+	// A headless pattern, `(1 2 x)`, is the shape a match* clause becomes. It is
+	// NOT the same rule as the `list`-headed form: measured, `(a b c)` on
+	// '(1 2 3) binds c to (2 3) while `(list a b c)` binds it to 3. blip's
+	// match_list_tail tail-captures on a bare last symbol unconditionally and the
+	// `list` branch tests the length first, so the two compile to different nodes.
+	if head.tag != .sym {
+		return e.positional_pattern(kids, 'pos')
+	}
+	match head.value {
+'list', 'vector' {
+			return e.positional_pattern(kids[1..], 'list')
+		}
+		'cons' {
+			if kids.len != 3 {
+				e.refuse('cons pattern')
+				return bad_pat()
+			}
+h := e.pattern(kids[1])
+			t := e.pattern(kids[2])
+			if !h.ok || !t.ok {
+				return bad_pat()
+			}
+			mut names := []string{}
+			names << h.names
+			names << t.names
+			return pat('["cons", ${h.js}, ${t.js}]', names)
+		}
+		'and', 'or' {
+			mut parts := [json_str(head.value)]
+			mut names := []string{}
+			for k in kids[1..] {
+				p := e.pattern(k)
+				if !p.ok {
+					return bad_pat()
+				}
+				parts << p.js
+				names << p.names
+			}
+			return pat('[${parts.join(', ')}]', names)
+		}
+		'struct' {
+			if kids.len < 2 {
+				e.refuse('struct pattern')
+				return bad_pat()
+			}
+			nm := e.node(kids[1])
+			if nm.tag != .sym {
+				e.refuse('struct pattern')
+				return bad_pat()
+			}
+			mut parts := ['"struct"', json_str(nm.value)]
+			mut names := []string{}
+			mut i := 2
+			for i < kids.len {
+f := e.node(kids[i])
+				mut field := ''
+				if f.tag == .kw {
+					field = f.value
+				} else if f.tag == .sym && f.value.ends_with(':') {
+					field = f.value[..f.value.len - 1]
+				} else {
+					e.refuse('struct pattern')
+					return bad_pat()
+				}
+				if i + 1 >= kids.len {
+					e.refuse('struct pattern')
+					return bad_pat()
+				}
+				sub := e.pattern(kids[i + 1])
+				if !sub.ok {
+					return bad_pat()
+				}
+				parts << json_str(field)
+				parts << sub.js
+				names << sub.names
+				i += 2
+			}
+			return pat('[${parts.join(', ')}]', names)
+		}
+		else {
+			// `(>= 100)`: a call to a known procedure with the SUBJECT as its
+			// first argument (match.v pushes the subject, then the operands).
+			// Recognised by name from match.v's own list, so a user function
+			// named `list` cannot change what a pattern means.
+if !pattern_predicate(head.value) {
+				return e.positional_pattern(kids, 'pos')
+			}
+			mut parts := ['"pred"', e.symbol(head.value)]
+			for k in kids[1..] {
+				parts << e.value(k)
+			}
+			return pat('[${parts.join(', ')}]', [])
+		}
+	}
+}
+
+// positional_pattern is the `(a b c)` shape, with the last position allowed to
+// take the remainder. Whether it does is decided by the RUNTIME, because that
+// depends on the subject's length: positional first, tail second.
+fn (mut e Emitter) positional_pattern(kids []reader.NodeId, node string) Pat {
+	mut parts := [json_str(node)]
+	mut names := []string{}
+	for k in kids {
+		p := e.pattern(k)
+		if !p.ok {
+			return bad_pat()
+		}
+		parts << p.js
+		names << p.names
+	}
+	return pat('[${parts.join(', ')}]', names)
+}
+// binding_pattern compiles a pattern used to DESTROY rather than to match, in a
+// `let` binding or a function parameter. It is not `pattern`, and the difference
+// is not cosmetic: `machine/mod.v` destructuring is positional with NO tail
+// capture, because `(list h t)` binding `h` alone and calling `t` the remainder
+// would be the wrong reading in a binding. So a sequence binding compiles to
+// `["fix", ...]` and a table binding to `["btab", ...]`, both of which the
+// runtime treats differently from their matching counterparts.
+fn (mut e Emitter) binding_pattern(id reader.NodeId) Pat {
+	d := e.node(id)
+	match d.tag {
+		.sym {
+			if d.value == '_' || d.value == 'else' {
+				return pat('["wc"]', [])
+			}
+			return pat('["sym", ${json_str(e.mangle_name(d.value))}]',
+				[e.mangle_name(d.value)])
+		}
+		.nil, .int, .float, .str, .bool, .char, .rat, .kw {
+			return pat('["lit", ${e.value(id)}]', [])
+		}
+		.table, .array, .buffer {
+			kids := e.kids(id)
+			mut parts := ['"btab"']
+			mut names := []string{}
+			mut i := 0
+			for i + 1 < kids.len {
+				k := e.node(kids[i])
+				if k.tag != .kw {
+					e.refuse('table binding')
+					return bad_pat()
+				}
+				sub := e.binding_pattern(kids[i + 1])
+				if !sub.ok {
+					return bad_pat()
+				}
+				parts << json_str(k.value)
+				parts << sub.js
+				names << sub.names
+				i += 2
+			}
+			return pat('[${parts.join(', ')}]', names)
+		}
+		.list, .vector {
+			kids := e.kids(id)
+			if kids.len == 0 {
+				return pat('["fix"]', [])
+			}
+			head := e.node(kids[0])
+			// `and`, `or` and the predicate forms test; a binding cannot, so they
+			// are refused rather than compiled into something that binds nothing.
+			if head.tag == .sym && (head.value == 'and' || head.value == 'or'
+				|| pattern_predicate(head.value)) {
+				e.refuse('binding pattern')
+				return bad_pat()
+			}
+			if head.tag == .sym && head.value == 'struct' {
+				return e.struct_binding(kids)
+			}
+			if head.tag == .sym && head.value == 'cons' {
+				if kids.len != 3 {
+					e.refuse('cons binding')
+					return bad_pat()
+				}
+				h := e.binding_pattern(kids[1])
+				t := e.binding_pattern(kids[2])
+				if !h.ok || !t.ok {
+					return bad_pat()
+				}
+				mut names := []string{}
+				names << h.names
+				names << t.names
+				return pat('["cons", ${h.js}, ${t.js}]', names)
+			}
+			// `(list a b)` and the headless `(a b)` are both just positions.
+			mut positions := if head.tag == .sym && (head.value == 'list' || head.value == 'vector') {
+				kids[1..]
+			} else {
+				kids
+			}
+			mut parts := ['"fix"']
+			mut names := []string{}
+			for k in positions {
+				sub := e.binding_pattern(k)
+				if !sub.ok {
+					return bad_pat()
+				}
+				parts << sub.js
+				names << sub.names
+			}
+			return pat('[${parts.join(', ')}]', names)
+		}
+		else {
+			e.refuse('binding pattern')
+			return bad_pat()
+		}
+	}
+}
+
+// struct_binding is `(struct Point x: px y: py)` in a parameter or a binding: the
+// name is checked, then each field is bound to its own sub-pattern.
+fn (mut e Emitter) struct_binding(kids []reader.NodeId) Pat {
+	if kids.len < 2 {
+		e.refuse('struct binding')
+		return bad_pat()
+	}
+	nm := e.node(kids[1])
+	if nm.tag != .sym {
+		e.refuse('struct binding')
+		return bad_pat()
+	}
+	mut parts := ['"struct"', json_str(nm.value)]
+	mut names := []string{}
+	mut i := 2
+	for i < kids.len {
+		f := e.node(kids[i])
+		mut field := ''
+		if f.tag == .kw {
+			field = f.value
+		} else if f.tag == .sym && f.value.ends_with(':') {
+			field = f.value[..f.value.len - 1]
+		} else {
+			e.refuse('struct binding')
+			return bad_pat()
+		}
+		if i + 1 >= kids.len {
+			e.refuse('struct binding')
+			return bad_pat()
+		}
+		sub := e.binding_pattern(kids[i + 1])
+		if !sub.ok {
+			return bad_pat()
+		}
+		parts << json_str(field)
+		parts << sub.js
+		names << sub.names
+		i += 2
+	}
+	return pat('[${parts.join(', ')}]', names)
+}
+
+// pattern_let emits a `let` whose bindings are PATTERNS rather than names.
+//
+// The values are evaluated first, in order, before any pattern is matched --
+// `let` binds simultaneously, and a value that has a side effect must run even
+// if a later pattern misses. A pattern that misses binds nil for the plain
+// `let`, because blip's destructuring builds `get` and `list-ref` calls and
+// those answer rather than fail; `let assert` is the spelling that fails loudly.
+fn (mut e Emitter) pattern_let(bindings []reader.NodeId, body []reader.NodeId) {
+	mut vals := []string{}
+	mut pats := []Pat{}
+	for b in bindings {
+		inner := e.kids(b)
+		if inner.len < 2 {
+			e.refuse('let binding')
+			return
+		}
+		vals << e.value(inner[1])
+		p := e.binding_pattern(inner[0])
+		if !p.ok {
+			return
+		}
+		pats << p
+	}
+	e.gensym++
+	e.emit('(() => {')
+	for i, v in vals {
+		tag := '__blip_l${e.gensym}${i}'
+		e.emit('const ${tag} = pat_match(${pats[i].js}, ${v});')
+		for nm in pats[i].names {
+			e.emit('const ${nm} = ${tag} ? ${tag}["${nm}"] : null;')
+		}
+	}
+	e.depth++
+	for i, b in body {
+		if i == body.len - 1 {
+			e.emit('return ${e.value(b)};')
+		} else {
+			e.stmt(b)
+		}
+	}
+	e.depth--
+	e.emit('})();')
+}
+
+// pattern_predicate is machine/match.v's own list, copied rather than
+// imported: the emitter is a separate module and matching one name here against
+// that list is what keeps `(list 1 2)` a list pattern rather than a predicate.
+fn pattern_predicate(name string) bool {
+	return name in ['<', '>', '<=', '>=', '=', 'not=', 'eq?', 'zero?', 'even?', 'odd?',
+		'positive?', 'negative?', 'list?', 'pair?', 'vector?', 'table?', 'array?',
+		'string?', 'symbol?', 'keyword?', 'integer?', 'float?', 'number?',
+		'boolean?', 'rune?', 'nil?', 'null?', 'function?']
+}
+
+// match_expr emits a whole `match` or `match*` as ONE IIFE.
+//
+// It used to emit a `let` statement for the subject and a chain of ternaries as
+// the expression. That works only where a statement is legal: in EXPRESSION
+// position -- `(print (match x ...))` -- it put a `let` in the middle of an
+// expression, which is not JavaScript. An IIFE is legal everywhere, and it also
+// gives the clause bindings a real scope, which the guard needs: a guard is
+// evaluated with the pattern's bindings in scope and falls through when false.
 fn (mut e Emitter) match_expr(kids []reader.NodeId) string {
+	head_node := e.node(kids[0])
 	if kids.len < 3 {
 		e.refuse('match')
 		return 'null'
 	}
-	subject := e.value(kids[1])
-	e.gensym++
-	// A fresh name for the subject, so a binding pattern can shadow it without
-	// the body seeing the original. The counter is local to this emitter because
-	// there is no arena here to name things in.
-	subj := '__blip_subject${e.gensym}'
-	e.emit('let ${subj} = ${subject};')
-	mut out := 'null'
-	for i := kids.len - 1; i >= 2; i-- {
-		parts := e.kids(kids[i])
-		if parts.len < 2 {
-			continue
+	// `match*` is a macro over `match` whose shape is fixed here, exactly as
+	// transform_match_star fixes it in the machine: every subject goes into ONE
+	// `list` call, so each is evaluated exactly once, and each clause becomes a
+	// pattern with one position per subject.
+	is_star := head_node.value.ends_with('*')
+	mut subject := ''
+	if is_star {
+		subj_kids := e.kids(kids[1])
+		mut parts := []string{}
+		for s in subj_kids {
+			parts << e.value(s)
 		}
-		pattern := e.node(parts[0])
-		// `#:when guard` sits between the pattern and the result.
-		mut ri := 1
-		mut guard := ''
-		if parts.len >= 3 {
-			kw := e.node(parts[1])
-			if kw.tag == .kw && kw.value == '#:when' {
-				guard = e.value(parts[2])
-				ri = 3
-			}
-		}
-		if ri >= parts.len {
-			continue
-		}
-		body := parts[ri..].map(e.value).join(', ')
-
-		// `_` matches anything; `else` is the fallback. The test is a literal
-		// `true`, which needs no helper -- an earlier version emitted
-		// `blip_truthy_true()`, a function I put in the V emitter instead of the
-		// JavaScript runtime, so the generated file referenced a name that
-		// existed nowhere.
-		if pattern.tag == .sym && (pattern.value == '_' || pattern.value == 'else') {
-			out = '(true ? (${body}) : ${out})'
-			continue
-		}
-		// A literal pattern is an equality test.
-		if pattern.tag in literal_tags {
-			test := 'blip.p_equal_q(${subj}, ${e.value(parts[0])})'
-			out = e.guarded(test, guard, body, out)
-			continue
-		}
-		// A bare symbol binds the subject to that name and always matches.
-		if pattern.tag == .sym {
-			bind := e.mangle_name(pattern.value)
-			e.emit('let ${bind} = ${subj};')
-			out = e.guarded('true', guard, body, out)
-			continue
-		}
-		// A list or vector pattern means destructuring, which is not emitted yet.
-		e.refuse('match pattern')
-		return 'null'
+		subject = 'blip.list(${parts.join(', ')})'
+	} else {
+		subject = e.value(kids[1])
 	}
-	return '((${out}))'
+	e.gensym++
+	subj := '__blip_subject${e.gensym}'
+	mut lines := []string{}
+	lines << 'const ${subj} = ${subject};'
+	for i := 2; i < kids.len; i++ {
+		parts := e.kids(kids[i])
+		if parts.len == 0 {
+			continue
+		}
+		mut pi := 0
+		mut guard := ''
+		// A guard may lead the clause or follow the pattern; machine/mod.v reads
+		// both now, and the example writes the trailing one.
+		if e.node(parts[0]).tag == .kw && e.node(parts[0]).value == '#:when' {
+			if parts.len < 2 {
+				e.refuse('match guard')
+				return 'null'
+			}
+			guard = e.value(parts[1])
+			pi = 2
+		}
+		if pi >= parts.len {
+			continue
+		}
+		mut p := bad_pat()
+		if is_star {
+			// Each sub-pattern gets its own position in the subject list, which is
+			// what makes a clause try only when ALL of them match, and what makes
+			// every subject exactly-once.
+			mut pp := []string{}
+			mut names := []string{}
+			for k in e.kids(parts[pi]) {
+				sp := e.pattern(k)
+				if !sp.ok {
+					return 'null'
+				}
+				pp << sp.js
+				names << sp.names
+			}
+			p = pat('["list", ${pp.join(', ')}]', names)
+		} else {
+			p = e.pattern(parts[pi])
+		}
+		if !p.ok {
+			return 'null'
+		}
+		pi++
+		if pi < parts.len && e.node(parts[pi]).tag == .kw && e.node(parts[pi]).value == '#:when' {
+			if pi + 1 >= parts.len {
+				e.refuse('match guard')
+				return 'null'
+			}
+			guard = e.value(parts[pi + 1])
+			pi += 2
+		}
+		if pi >= parts.len {
+			continue
+		}
+		// The value of the clause is its LAST form. Earlier ones run for their
+		// effects, and the comma operator is what makes that true in an
+		// expression position.
+		body := parts[pi..].map(e.value).join(', ')
+		tag := '__blip_b${e.gensym}${i}'
+		lines << '{ const ${tag} = pat_match(${p.js}, ${subj});'
+		lines << 'if (${tag} !== "no") {'
+		for name in p.names {
+			lines << 'const ${name} = ${tag}["${name}"];'
+		}
+		if guard == '' {
+			lines << 'return ${body};'
+		} else {
+			lines << 'if (blip_truthy(${guard})) { return ${body}; }'
+		}
+		lines << '} }'
+	}
+	// No clause matched: a `match` answers nil, the way the machine does.
+	lines << 'return null;'
+	return '(() => {\n${lines.join('\n')}\n})()'
 }
 
 // collection emits the three non-list literal forms: `{:a 1}`, `@(1 2 3)` and
@@ -1447,7 +2078,8 @@ fn (mut e Emitter) mangle_name(s string) string {
 	if !needs_mangle(s) {
 		return s
 	}
-	out := s.replace('-', '_').replace('?', '_q').replace('!', '_b')
+	mut out := s.replace('-', '_').replace('?', '_q').replace('!', '_b')
+	out = out.replace('*', '_star_').replace('#', '_hash_')
 	// A first mapping wins. If this identifier was already claimed by a
 	// DIFFERENT blip name, the program has a genuine collision, and it is
 	// recorded rather than silently compiled to whichever came first.
@@ -1460,7 +2092,7 @@ fn (mut e Emitter) mangle_name(s string) string {
 }
 
 fn needs_mangle(s string) bool {
-	return s.contains('-') || s.contains('?') || s.contains('!')
+	return s.contains('-') || s.contains('?') || s.contains('!') || s.contains('*') || s.contains('#')
 }
 
 // ------------------------------------------------------------------ text

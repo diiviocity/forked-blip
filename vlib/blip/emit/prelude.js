@@ -70,15 +70,15 @@ const blip = {
   array_length: (v) => unvec(v).length,
   // `put` and `remove` return NEW tables (prim_put clones the map first), so
   // the input is never mutated. `put!` and `remove!` mutate in place.
-  put: (t, k, v) => ({ blip_table: { ...(t.blip_table || {}), [k]: v } }),
+  put: (t, k, v) => ({ blip_table: { ...(t.blip_table || {}), [keyof(k)]: v } }),
   remove: (t, k) => {
     const next = { ...(t.blip_table || {}) };
-    delete next[k];
+    delete next[keyof(k)];
     return { blip_table: next };
   },
   put_b: (t, k, v) => {
-    if (t && t.blip_table) t.blip_table[k] = v;
-    else if (t && t.blip_buffer) t.blip_buffer[k] = v;
+    if (t && t.blip_table) t.blip_table[keyof(k)] = v;
+    else if (t && t.blip_buffer) t.blip_buffer[keyof(k)] = v;
     return t;
   },
   // `string-split` answers a LIST of strings (prim_string_split ends in
@@ -139,7 +139,7 @@ const blip = {
   // what `(get {:a 1} :missing)` returns, and what the third argument overrides.
   get: (t, k, ...rest) => {
     const m = unvec(t);
-    const key = m && m.blip_table ? m.blip_table[k] : undefined;
+    const key = m && m.blip_table ? m.blip_table[keyof(k)] : undefined;
     if (key !== undefined && key !== null) return key;
     return rest.length > 0 ? rest[0] : null;
   },
@@ -284,6 +284,197 @@ function rewrap(orig, items) {
 // blip_show is the printer. It is separate from console.log because blip prints
 // a string WITH its quotes, the way the blip printer does -- printing one without
 // them would make emitted output disagree with `blip run`.
+// keyof normalises a lookup key. A keyword datum and its bare name are the same
+// key -- `blip get :a` and `blip get "a"` find the same entry -- so every table
+// operation runs its key through this instead of trusting the caller's spelling.
+function keyof(k) {
+  return k && k.blip_kw !== undefined ? k.blip_kw : k;
+}
+
+// pat_match matches a COMPILED pattern -- a tree of tagged arrays built by the
+// emitter -- against a subject, and returns either a bindings object or the
+// string "no". A string and an object cannot be confused, so the caller can use
+// it directly as a condition, and a bindings object is never a bare string.
+//
+// The rules are machine/match.v's, not an independent opinion:
+//
+//   ["lit", v]        equality against v
+//   ["sym", name]     binds the whole subject; always matches
+//   ["wc"]            `_`: matches, binds nothing
+//   ["list", p, ...]  a sequence pattern, with the length rule below
+//   ["cons", p, t]    car matches p, cdr matches t
+//   ["table", k, p]   the key k must be present, and its value must match p
+//   ["struct", n, k, p, ...]  the struct name, then field: pattern pairs
+//   ["and", p, ...]   every pattern, bindings merged
+//   ["or", p, ...]    the first that matches, and ITS bindings
+//   ["pred", f, a...] f(subject, a...), matched by truthiness
+//
+// `["lit", null]` is what a nil PATTERN means, and it is not `["sym"]`: the
+// reader records nil as the empty sequence (match.v `.nil` arm), so `nil`
+// matches '() and matches nothing else.
+function pat_match(pat, subj) {
+  const head = pat[0];
+  if (head === "lit") return blip_equal(pat[1], subj) ? {} : "no";
+  if (head === "wc") return {};
+  if (head === "sym") return { [pat[1]]: subj };
+  if (head === "pred") return pat[1].apply(null, [subj].concat(pat.slice(2))) ? {} : "no";
+  if (head === "and") {
+    const out = {};
+    for (let i = 1; i < pat.length; i++) {
+      const r = pat_match(pat[i], subj);
+      if (r === "no") return "no";
+      Object.assign(out, r);
+    }
+    return out;
+  }
+  if (head === "or") {
+    for (let i = 1; i < pat.length; i++) {
+      const r = pat_match(pat[i], subj);
+      if (r !== "no") return r;
+    }
+    return "no";
+  }
+  if (head === "cons") {
+    if (!is_pair(subj)) return "no";
+    const items = unvec(subj);
+    const a = pat_match(pat[1], items[0]);
+    if (a === "no") return "no";
+    const b = pat_match(pat[2], items.slice(1));
+    if (b === "no") return "no";
+    return Object.assign(a, b);
+  }
+  if (head === "table") {
+    const m = unvec(subj);
+    const out = {};
+    for (let i = 1; i + 1 < pat.length; i += 2) {
+      const key = pat[i];
+      const t = m && m.blip_table ? m.blip_table : m && m.blip_buffer ? m.blip_buffer
+        : m && m.blip_struct !== undefined ? m : null;
+      if (!t || !Object.prototype.hasOwnProperty.call(t, key)) return "no";
+      const r = pat_match(pat[i + 1], t[key]);
+      if (r === "no") return "no";
+      Object.assign(out, r);
+    }
+    return out;
+  }
+  if (head === "struct") {
+    if (!subj || subj.blip_struct === undefined) return "no";
+    if (subj.blip_struct !== pat[1]) return "no";
+    const out = {};
+    for (let i = 2; i + 1 < pat.length; i += 2) {
+      if (!Object.prototype.hasOwnProperty.call(subj, pat[i])) return "no";
+      const r = pat_match(pat[i + 1], subj[pat[i]]);
+      if (r === "no") return "no";
+      Object.assign(out, r);
+    }
+    return out;
+  }
+  if (head === "fix") {
+    // A BINDING pattern, which is not a match pattern. `machine/mod.v`
+    // destructuring is deliberately positional with no tail capture, because in a
+    // binding `(list h t)` binding only `h` and calling `t` the rest would be the
+    // wrong reading. Measured: `(let ([(list a b) '(1 2 3)]) [a b])` is [1 2], so
+    // extra elements are ignored rather than rejected; a short subject is
+    // `list-ref`'s out-of-range error, which is what blip reports.
+    const items = seq_items(subj);
+    if (items === null) return "no";
+    const out = {};
+    for (let i = 0; i < pat.length - 1; i++) {
+      const p = pat[i + 1];
+      if (p[0] === "wc") continue;
+      if (i >= items.length) {
+        throw new Error("blip: list-ref: index " + i + " out of range (length "
+          + items.length + ")");
+      }
+      const r = pat_match(p, items[i]);
+      if (r === "no") return "no";
+      Object.assign(out, r);
+    }
+    return out;
+  }
+  if (head === "btab") {
+    // A table BINDING, which differs from a table MATCH in one place: a missing
+    // key binds nil rather than failing, because the machine builds the binding
+    // from `get` calls and `get` of an absent key is nil. Only `let assert`
+    // demands the key, and it uses the matching node.
+    const m = unvec(subj);
+    const out = {};
+    for (let i = 1; i + 1 < pat.length; i += 2) {
+      const key = pat[i];
+      const t = m && m.blip_table ? m.blip_table : m && m.blip_buffer ? m.blip_buffer
+        : m && m.blip_struct !== undefined ? m : null;
+      const r = pat_match(pat[i + 1], t && Object.prototype.hasOwnProperty.call(t, key)
+        ? t[key] : null);
+      if (r === "no") return "no";
+      Object.assign(out, r);
+    }
+    return out;
+  }
+  // A sequence pattern. `["list"]` with no sub-patterns is the empty one.
+  const items = seq_items(subj);
+  if (items === null) return "no";
+  const rest = pat.slice(1);
+  if (rest.length === 0) return items.length === 0 ? {} : "no";
+  const last = rest[rest.length - 1];
+  const isWc = last[0] === "wc";
+  const isCap = last[0] === "sym";
+  // `["pos"]` is the headless form `(a b c)`, and it is NOT the same rule as
+  // `["list"]`. Measured: `(a b c)` on '(1 2 3) binds c to (2 3) even though the
+  // lengths are equal, while `(list a b c)` on the same subject binds c to 3.
+  // match_list_tail tail-captures on a bare last symbol unconditionally, and the
+  // `list` branch tests the length first. So the two spellings disagree in blip,
+  // and an emitter that merged them would be wrong about one of the two.
+  const tails = pat[0] === "pos"
+    ? isCap
+    : !isWc && isCap && rest.length !== items.length;
+  if (pat[0] === "pos") {
+    if (isWc) {
+      if (rest.length - 1 !== items.length) return "no";
+    } else if (rest.length - 1 > items.length) {
+      return "no";
+    }
+  } else if (isWc) {
+    if (rest.length - 1 !== items.length) return "no";
+  } else if (tails) {
+    if (rest.length > items.length) return "no";
+  } else if (rest.length !== items.length) {
+    return "no";
+  }
+  const out = {};
+  for (let i = 0; i < rest.length; i++) {
+    // A wildcard is skipped before any bounds test: `(list a b c _)` has four
+    // patterns for three elements and the fourth binds nothing.
+    if (rest[i][0] === "wc") continue;
+    if (tails && i === rest.length - 1) {
+      const r = pat_match(rest[i], items.slice(i));
+      if (r === "no") return "no";
+      Object.assign(out, r);
+      continue;
+    }
+    if (i >= items.length) return "no";
+    const r = pat_match(rest[i], items[i]);
+    if (r === "no") return "no";
+    Object.assign(out, r);
+  }
+  return out;
+}
+
+// seq_items is `prims.seq`: the element list of anything blip can walk, and
+// null for anything it cannot. A list, a vector and a string are sequences; a
+// table and a number are not, which is why `(list x)` misses a bare number.
+function seq_items(x) {
+  if (typeof x === "string") return null;
+  const v = unvec(x);
+  return Array.isArray(v) ? v : null;
+}
+
+// is_pair reports whether a value is a CONS cell. A list and a vector both
+// walk the same way here, because a quoted list is the pair chain blip prints
+// as `(1 2 3)` and the elements are in that order either way.
+function is_pair(x) {
+  return Array.isArray(unvec(x)) && unvec(x).length >= 2;
+}
+
 function blip_show(x) {
   // `null`/`undefined` is blip's `nil`, and the printer spells it `nil`. Returning
   // `null` here made `(match 7 [1 'one])` print `null` where blip prints `nil`.
@@ -346,6 +537,16 @@ function blip_truthy(x) {
 
 function blip_equal(a, b) {
   if (a === null || a === undefined) return b === null || b === undefined;
+  // A keyword and a symbol are tagged OBJECTS, so `===` says two `:dog` values
+  // are different. They are the same value: a table stores its keys as names and
+  // its keyword values as tags, and a pattern compares a stored value against a
+  // literal, so identity here breaks every keyword comparison there is.
+  const ak = a.blip_kw !== undefined ? "kw" : (a.blip_sym !== undefined ? "sym" : null);
+  const bk = b.blip_kw !== undefined ? "kw" : (b.blip_sym !== undefined ? "sym" : null);
+  if (ak || bk) {
+    if (!ak || ak !== bk) return false;
+    return ak === "kw" ? a.blip_kw === b.blip_kw : a.blip_sym === b.blip_sym;
+  }
   const ua = unvec(a);
   const ub = unvec(b);
   if (Array.isArray(ua) && Array.isArray(ub)) {

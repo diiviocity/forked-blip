@@ -2683,6 +2683,21 @@ fn (mut m Machine) try_clauses(k blip.Kont, subject blip.Value) ! {
 			pattern = ckids[pi]
 			pi++
 		}
+		// `#:when` is ALSO accepted where the example writes it, after the
+		// pattern: `[(list x) #:when (even? x) 'even]`. Only the leading position
+		// used to be read, so a trailing guard was not ignored -- it was worse
+		// than ignored: `#:when` and its test were evaluated as the first two
+		// forms of the clause BODY, and the clause matched unconditionally. A
+		// guard that silently does not guard is the most expensive kind of typo,
+		// so both spellings are read now.
+		if pi < ckids.len && m.arena.node(ckids[pi]).tag == .kw
+			&& m.arena.node(ckids[pi]).value == '#:when' {
+			if pi + 1 >= ckids.len {
+				return error('match: #:when needs a test')
+			}
+			guard = ckids[pi + 1]
+			pi += 2
+		}
 		// `else` as a clause head matches everything with no bindings.
 		mut is_else := false
 		if pattern != blip.NodeId(-1) {
