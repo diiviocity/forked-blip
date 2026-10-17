@@ -346,6 +346,76 @@ const blip = {
     const items = unvec(xs);
     return Array.isArray(items) ? items.every((x) => blip_truthy(tramp(f(x)))) : true;
   },
+  // ---- the sequence and scalar prims the examples reach for -----------------
+  //
+  // Aliases are routed to the SAME function rather than to a copy of it:
+  // `first` is `car` in blip (`p['first'] = prim_car`), and two spellings of one
+  // operation are how they drift.
+  first: (x) => unvec(x)[0],
+  rest: (x) => unvec(x).slice(1),
+  last: (x) => {
+    const items = unvec(x);
+    return Array.isArray(items) && items.length > 0 ? items[items.length - 1] : null;
+  },
+  count: (x) => {
+    const items = unvec(x);
+    return Array.isArray(items) ? items.length : 0;
+  },
+  // list-ref is bounds-CHECKED, and the message names the length: an index error
+  // without one sends the reader looking for a different mistake.
+  list_ref: (x, i) => {
+    const items = unvec(x);
+    if (i < 0 || i >= items.length) {
+      throw new Error("list-ref: index " + i + " out of range (length " + items.length + ")");
+    }
+    return items[i];
+  },
+  nil_q: (x) => is_empty_seq(x),
+  not_eq: (a, b) => !blip_equal(a, b),
+  zero: (x) => blip_equal(x, 0),
+  // range is INCLUSIVE on both ends and answers a LIST.
+  range: (a, b) => {
+    const from = b === undefined ? 0 : a;
+    const to = b === undefined ? a : b;
+    const out = [];
+    for (let i = from; i <= to; i++) out.push(i);
+    return out;
+  },
+  remainder: (a, b) => {
+    if (b === 0) throw new Error("remainder by zero");
+    return a % b;
+  },
+  sqrt: (x) => {
+    if (x < 0) throw new Error("sqrt of a negative number");
+    return Math.sqrt(x);
+  },
+  // `str` and `string` are the same prim: the value as the PRINTER writes it,
+  // quotes and all.
+  str: (x) => blip_show(x),
+  string: (x) => blip_show(x),
+  symbol: (s) => blip.sym(s),
+  keyword: (s) => (s && s.blip_kw !== undefined ? s : blip.kw(s)),
+  vector: (...items) => blip.vec(...items),
+  string_not_blank_q: (s) => String(s).trim() !== "",
+  // frequencies answers a LIST of `(value count)` pairs in FIRST-SEEN order, not
+  // sorted, and each pair carries the ORIGINAL value -- not one rebuilt from its
+  // printed form, which is how the quote characters got INTO the data.
+  frequencies: (xs) => {
+    const items = unvec(xs);
+    const order = [];
+    const counts = new Map();
+    const first = new Map();
+    for (const v of Array.isArray(items) ? items : []) {
+      const key = typeof v === "string" ? v : blip_show(v);
+      if (!counts.has(key)) {
+        order.push(key);
+        counts.set(key, 0);
+        first.set(key, v);
+      }
+      counts.set(key, counts.get(key) + 1);
+    }
+    return order.map((k) => [first.get(k), counts.get(k)]);
+  },
   even_q: (n) => unvec(n) % 2 === 0,
   odd_q: (n) => unvec(n) % 2 !== 0,
 };
@@ -590,6 +660,15 @@ function map_result_go(r, f) {
   return is_result(v, "err") ? v : blip.ok(v);
 }
 
+// is_empty_seq answers blip's `nil?`: nil itself, or a sequence with nothing in
+// it. It is what a nil PATTERN matches (machine/match.v `.nil` arm), so the two
+// cannot drift apart.
+function is_empty_seq(x) {
+  if (x === null || x === undefined) return true;
+  const v = unvec(x);
+  return Array.isArray(v) && v.length === 0;
+}
+
 function blip_show(x) {
   // `null`/`undefined` is blip's `nil`, and the printer spells it `nil`. Returning
   // `null` here made `(match 7 [1 'one])` print `null` where blip prints `nil`.
@@ -636,7 +715,12 @@ function blip_show(x) {
       .map((k) => blip_show(x[k]));
     return "(" + x.blip_struct + " " + vals.join(" ") + ")";
   }
-  if (typeof x === "string") return "\"" + x + "\"";
+  if (typeof x === "string") return '"' + x
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t") + '"';
   if (Array.isArray(x)) return "(" + x.map(blip_show).join(" ") + ")";
   // A boolean prints `#t` or `#f`, the way the blip printer spells it.
   if (x === true) return "#t";

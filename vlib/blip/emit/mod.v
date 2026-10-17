@@ -98,6 +98,41 @@ mut:
 	gensym   int
 	mangled  map[string]string
 	collided map[string]string
+	// locals are the names bound by an enclosing construct, innermost last. A
+	// local SHADOWS a primitive of the same name, exactly as it does in blip: a
+	// `match` clause binds `rest`, and a body that says `rest` means that
+	// binding. Routing it to `blip.rest` instead is not a wrong answer -- it is
+	// the primitive printed as its own source, which is what `(list 1 rest)`
+	// produced.
+	locals []map[string]bool
+}
+
+// push_locals records names bound by a construct whose scope encloses whatever
+// is emitted next, and returns the depth to hand back to pop_locals.
+fn (mut e Emitter) push_locals(names []string) int {
+	mut m := map[string]bool{}
+	for n in names {
+		m[n] = true
+	}
+	e.locals << m
+	return e.locals.len
+}
+
+fn (mut e Emitter) pop_locals(depth int) {
+	for e.locals.len > depth {
+		e.locals.pop()
+	}
+}
+
+// is_local answers whether a name is bound by an enclosing construct. The blip
+// name is compared, not the mangled one, because that is what the source says.
+fn (e &Emitter) is_local(name string) bool {
+	for i := e.locals.len - 1; i >= 0; i-- {
+		if e.locals[i][name] {
+			return true
+		}
+	}
+	return false
 }
 
 // ------------------------------------------------------------------ helpers
@@ -399,6 +434,7 @@ fn (mut e Emitter) emit_define(kids []reader.NodeId) {
 // value of its last form, which is how blip decides it too.
 fn (mut e Emitter) named_function(name string, params []reader.NodeId, body []reader.NodeId) {
 	mut ps := []string{}
+	mut param_names := []string{}
 	// A parameter that is a PATTERN destructures on entry rather than being
 	// refused: `(define (dist (struct Point x: px y: py)) ...)`. The JavaScript
 	// parameters stay plain, and the destructuring is emitted as a statement at
@@ -410,6 +446,7 @@ fn (mut e Emitter) named_function(name string, params []reader.NodeId, body []re
 		d := e.node(p)
 		if d.tag == .sym {
 			ps << e.mangle_name(d.value)
+			param_names << d.value
 			arg++
 			continue
 		}
@@ -428,6 +465,7 @@ fn (mut e Emitter) named_function(name string, params []reader.NodeId, body []re
 		destructures << 'if (${tag} === "no") { throw new Error("blip: ${name}: parameter does not match its pattern"); }'
 		for nm in bp.names {
 			destructures << 'const ${nm} = ${tag}["${nm}"];'
+			param_names << nm
 		}
 		arg++
 	}
@@ -443,6 +481,12 @@ fn (mut e Emitter) named_function(name string, params []reader.NodeId, body []re
 	e.depth++
 	for line in destructures {
 		e.emit(line)
+	}
+	// Every parameter is in scope for the whole body, and a parameter named
+	// `first` or `string` must win over the primitive of that name.
+	mark := e.push_locals(param_names)
+	defer {
+		e.pop_locals(mark)
 	}
 	// The LAST body form is the function's value, so it is in tail position and
 	// everything before it is not. That is the whole rule.
@@ -766,7 +810,7 @@ fn (mut e Emitter) expression_form(name string, kids []reader.NodeId) ?string {
 		// quoted form as source produces.
 		return e.data(kids[1])
 	}
-	if (name == 'fn' || name == 'lambda') && kids.len >= 2 {
+if (name == 'fn' || name == 'lambda') && kids.len >= 2 {
 		params := e.kids(kids[1])
 		mut ps := []string{}
 		for p in params {
@@ -1516,8 +1560,15 @@ fn (mut e Emitter) match_expr(kids []reader.NodeId) string {
 			return 'null'
 		}
 		pi++
+		// The clause bindings are in scope for the GUARD and the body, and both
+		// are emitted after this. A guard that cannot see what its pattern bound
+		// cannot work, and a body that says `rest` means the binding rather than
+		// the primitive -- so the scope goes up before either is emitted, not
+		// after.
+		mark := e.push_locals(p.names)
 		if pi < parts.len && e.node(parts[pi]).tag == .kw && e.node(parts[pi]).value == '#:when' {
 			if pi + 1 >= parts.len {
+				e.pop_locals(mark)
 				e.refuse('match guard')
 				return 'null'
 			}
@@ -1525,6 +1576,7 @@ fn (mut e Emitter) match_expr(kids []reader.NodeId) string {
 			pi += 2
 		}
 		if pi >= parts.len {
+			e.pop_locals(mark)
 			continue
 		}
 		// The value of the clause is its LAST form. Earlier ones run for their
@@ -1543,6 +1595,7 @@ fn (mut e Emitter) match_expr(kids []reader.NodeId) string {
 			lines << 'if (blip_truthy(${guard})) { return ${body}; }'
 		}
 		lines << '} }'
+		e.pop_locals(mark)
 	}
 	// No clause matched: a `match` answers nil, the way the machine does.
 	lines << 'return null;'
@@ -1964,6 +2017,27 @@ fn mangle(name string) string {
 		'assert' { return 'assert' }
 		'any?' { return 'any_q' }
 		'every?' { return 'every_q' }
+		// The prims the examples and the standard library actually reach for.
+		// There are 126 prims in vlib/blip/prims and 17 of these were unrouted,
+		// which is how a program emitted cleanly and then died on `sqrt`.
+		'first' { return 'first' }
+		'rest' { return 'rest' }
+		'last' { return 'last' }
+		'count' { return 'count' }
+		'list-ref' { return 'list_ref' }
+		'nil?' { return 'nil_q' }
+		'not=' { return 'not_eq' }
+		'zero' { return 'zero' }
+		'range' { return 'range' }
+		'remainder' { return 'remainder' }
+		'sqrt' { return 'sqrt' }
+		'str' { return 'str' }
+		'string' { return 'string' }
+		'symbol' { return 'symbol' }
+		'keyword' { return 'keyword' }
+		'vector' { return 'vector' }
+		'string-not-blank?' { return 'string_not_blank_q' }
+		'frequencies' { return 'frequencies' }
 		else {
 			return 'p_' + name.replace('-', '_').replace('?', '_q').replace('!', '_b')
 		}
@@ -2062,6 +2136,24 @@ const prim_names = {
 		'assert':         true
 		'any?':           true
 		'every?':         true
+		'first':          true
+		'rest':           true
+		'last':           true
+		'count':          true
+		'list-ref':       true
+		'nil?':           true
+		'not=':           true
+		'zero':           true
+		'range':          true
+		'remainder':      true
+		'sqrt':           true
+		'str':            true
+		'string':         true
+		'symbol':         true
+		'keyword':        true
+		'vector':         true
+		'string-not-blank?': true
+		'frequencies':    true
 }
 
 // stmt emits a form as a statement, and drops a trailing `;` when the form is
@@ -2099,6 +2191,13 @@ fn (mut e Emitter) symbol(s string) string {
 	// A primitive used as a VALUE -- `(fold + 0 xs)` -- has to reach the runtime
 	// too, not only in callee position. `+` as a bare symbol is not a JavaScript
 	// expression, so this is the same routing `callable` does.
+	// A local binding shadows a primitive of the same name, so this check comes
+	// BEFORE the prim_names routing: `rest`, `first`, `last`, `count`, `string`,
+	// `symbol`, `vector` and `zero` are all primitives AND all ordinary names for
+	// someone to bind.
+	if e.is_local(s) {
+		return e.mangle_name(s)
+	}
 	if s in prim_names {
 		return 'blip.${mangle(s)}'
 	}
