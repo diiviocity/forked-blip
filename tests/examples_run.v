@@ -92,6 +92,7 @@ fn main() {
 	s.check_example('04_errors', 'examples/04_errors.lip', 'errors ok')
 	s.check_example('05_pipelines', 'examples/05_pipelines.lip', 'pipelines ok')
 	s.check_example('06_modules', 'examples/06_modules.lip', 'modules ok')
+	s.check_example('07_config', 'examples/07_config.lip', 'config ok')
 
 	if s.fails > 0 {
 		println('${s.fails} FAILURE(S)')

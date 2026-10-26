@@ -1,0 +1,50 @@
+;; examples/07_config.lip
+;; Configuration as code.
+;;
+;; Guix showed that a configuration file can be a program in the same language
+;; the system is written in: the file evaluates to a value, and that value IS
+;; the configuration. There is no parser, no schema file, no YAML. Evaluating
+;; the file with `blip run` (or `require`-ing it) is the whole loader, and
+;; `blip test` checks its `;=>` expectations like any other example.
+
+;; A configuration is a table. Labelled arguments supply defaults, so a
+;; minimal config file is a single call.
+(define (configure :host [host "localhost"]
+                   :port [port 8080]
+                   :debug [debug #f])
+  {:host host :port port :debug debug})
+
+(configure)                                    ;=> {:host "localhost" :port 8080 :debug #f}
+(configure :host "db.internal")                ;=> {:host "db.internal" :port 8080 :debug #f}
+(configure :port 5432 :debug #t)               ;=> {:host "localhost" :port 5432 :debug #t}
+
+;; A config file is just a call. This is the whole file a user writes:
+(configure :host "api.example.com" :port 443 :debug #f)   ;=> {:host "api.example.com" :port 443 :debug #f}
+
+;; Because it is code, a config can compute. Here a port derived from a name:
+(define (port-for name)
+  (if (= name "https") 443 8080))
+(configure :host "svc" :port (port-for "https"))   ;=> {:host "svc" :port 443 :debug #f}
+
+;; A config can also be validated before it is returned, using the same Result
+;; combinators as any other blip program. Bad input is a value, not an abort.
+(define (checked-config :host [host ""] :port [port 0])
+  (cond [(string-blank? host) (err 'missing-host)]
+        [(or (< port 1) (> port 65535)) (err 'bad-port)]
+        [else (ok {:host host :port port})]))
+
+(checked-config :host "x" :port 80)   ;=> (ok {:host "x" :port 80})
+(checked-config :host "" :port 80)    ;=> (err missing-host)
+(checked-config :host "x" :port 0)    ;=> (err bad-port)
+
+;; `use` propagates a failure without aborting the surrounding program:
+(use (checked-config :host "x" :port 80)
+  (print "loaded" checked-config))   ;=> nil
+
+;; A failing check is reported, not raised:
+(let r (checked-config :host "" :port 80)
+  (if (err? r)
+    (print "rejected:" (err-value r))   ;=> nil
+    (print "accepted" (ok-value r))))
+
+(print "config ok")
