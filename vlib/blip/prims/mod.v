@@ -8,6 +8,7 @@ module prims
 // it. Without that separation the two would be mutually dependent.
 
 import math
+import os
 import strconv
 import vlib.blip
 import vlib.blip.printer
@@ -15,8 +16,7 @@ import vlib.blip.printer
 // AtoF64Param is not exported by name in this V version, so it is built from its
 // only public field. allow_extra_chars must be false: a parse of "12abc" has to
 // be rejected rather than silently yielding 12.
-const strict_float = strconv.AtoF64Param{
-}
+const strict_float = strconv.AtoF64Param{}
 
 // table returns every primitive, keyed by name.
 pub fn table() map[string]blip.PrimFn {
@@ -105,6 +105,14 @@ pub fn table() map[string]blip.PrimFn {
 	p['array-length'] = prim_array_length
 	p['array-empty?'] = prim_array_emptyp
 	p['put!'] = prim_put_bang
+	// Configuration-friendly I/O. These are hand-written rather than
+	// generated, because they need the OS, not V's standard library.
+	// They answer Result values so a config file can say `(use (read-file
+	// "x") body)` and skip on failure, instead of aborting.
+	p['read-file'] = prim_read_file
+	p['write-file'] = prim_write_file
+	p['file-exists?'] = prim_file_exists
+	p['env'] = prim_env
 	p['dissoc!'] = prim_dissoc_bang
 	p['string-index-of'] = prim_string_index_of
 	p['string-not-blank?'] = prim_string_not_blank
@@ -133,7 +141,7 @@ pub fn table() map[string]blip.PrimFn {
 	p['struct-name'] = prim_struct_name
 	p['struct-ref'] = prim_struct_ref
 	p['struct-set!'] = prim_struct_set
-p['__struct-mutate!'] = prim_struct_mutate
+	p['__struct-mutate!'] = prim_struct_mutate
 	p['integer->rune'] = prim_integer_to_rune
 	p['rune->integer'] = prim_rune_to_integer
 	p['string->rune'] = prim_string_to_rune
@@ -1133,8 +1141,6 @@ fn prim_range(args []blip.Value) !blip.Value {
 	return blip.list_from(out)
 }
 
-
-
 fn prim_count(args []blip.Value) !blip.Value {
 	return blip.integer(seq(args[0])!.len)
 }
@@ -1185,7 +1191,6 @@ pub fn sort_by_keyed(items []blip.Value, keys []blip.Value) !blip.Value {
 	return blip.list_from(out)
 }
 
-
 // frequencies returns a table of symbol/count pairs, as
 // (get e 0) and (get e 1) read it. A table of counts would force a get for the
 // count and a has-key? for the membership, and the examples read it with `car` and
@@ -1230,7 +1235,6 @@ fn as_vector_value(v blip.Value, name string) !&blip.Vector {
 	}
 	return v.as_vector()
 }
-
 
 fn prim_vector_rev(args []blip.Value) !blip.Value {
 	data := as_vector_value(args[0], 'vector-rev')!.data
@@ -1540,4 +1544,56 @@ fn prim_dec(args []blip.Value) !blip.Value {
 		return blip.float(args[0].as_float() - 1.0)
 	}
 	return blip.integer(need_int('dec', args[0])! - 1)
+}
+
+// ------------------------------------------------------------------ config / io
+//
+// Hand-written because they need the OS, not V's standard library, and because
+// they return Result values (ok ...)/(err ...) rather than aborting: a config
+// file reads a file that may be missing, and that is a value, not a crash.
+// Errors are spelled as (err "message") so they compose with `use`.
+
+fn prim_read_file(args []blip.Value) !blip.Value {
+	if args.len != 1 {
+		return error('read-file expects 1 argument, got ${args.len}')
+	}
+	path := need_str('read-file', args[0])!
+	src := os.read_file(path) or {
+		return blip.list_from([blip.symbol('err'),
+			blip.string('read-file: cannot read ${path}: ${err.msg()}')])
+	}
+	return blip.list_from([blip.symbol('ok'), blip.string(src)])
+}
+
+fn prim_write_file(args []blip.Value) !blip.Value {
+	if args.len != 2 {
+		return error('write-file expects 2 arguments, got ${args.len}')
+	}
+	path := need_str('write-file', args[0])!
+	data := need_str('write-file', args[1])!
+	os.write_file(path, data) or {
+		return blip.list_from([blip.symbol('err'),
+			blip.string('write-file: cannot write ${path}: ${err.msg()}')])
+	}
+	return blip.list_from([blip.symbol('ok'), blip.nil_value()])
+}
+
+fn prim_file_exists(args []blip.Value) !blip.Value {
+	if args.len != 1 {
+		return error('file-exists? expects 1 argument, got ${args.len}')
+	}
+	path := need_str('file-exists?', args[0])!
+	return blip.boolean(os.exists(path))
+}
+
+fn prim_env(args []blip.Value) !blip.Value {
+	if args.len != 1 {
+		return error('env expects 1 argument, got ${args.len}')
+	}
+	name := need_str('env', args[0])!
+	v := os.getenv(name)
+	if v == '' {
+		return blip.nil_value()
+	}
+	return blip.string(v)
 }

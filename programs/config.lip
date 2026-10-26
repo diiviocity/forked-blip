@@ -1,0 +1,43 @@
+;; programs/config.lip -- reading configuration like a configuration language.
+;;
+;; A configuration file is data with opinions. This program reads a small
+;; key: value file from disk, validates every line, and reports what it found.
+;; Nothing here aborts: a missing file, a malformed line and a missing key
+;; are all values, and `use` is how they stop the work without stopping the
+;; program.
+
+(define (parse-line line)
+  ;; (ok key value) or (err reason). `parse-in` from std.lip does the split;
+  ;; an empty line is not an error, it is just nothing.
+  (if (string-blank? line)
+    (ok nil nil)
+    (use (parse-in line)
+      (ok r1 r2))))
+
+(define (read-config path)
+  ;; Read the file, then fold each line into a table. A read failure stops
+  ;; the whole thing: there is no config to fold.
+  (let res (read-file path)
+    (if (err? res)
+      res
+      (let lines (string-split (ok-value res) "\n")
+        (fold (fn [acc line]
+                (use (parse-line line)
+                  (if (nil? r1)
+                    acc
+                    (put acc r1 r2))))
+              {}
+              lines)))))
+
+;; ---------------------------------------------------------------- demo
+;; Build a config file on disk, then read it back.
+(let tmp (string-append (env "TEMP") "/blip-config-demo.txt")
+  (use (write-file tmp "host: localhost\nport: 8080\n\ndebug: true\n")
+    (let cfg (read-config tmp)
+      (begin
+        (print "host:" (get cfg "host"))
+        (print "port:" (get cfg "port"))
+        (print "debug:" (get cfg "debug"))
+        (print "missing:" (get cfg "nope"))
+        (print (if (file-exists? tmp) "file present" "file absent"))
+        (print "config ok")))))
