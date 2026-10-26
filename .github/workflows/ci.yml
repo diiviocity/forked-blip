@@ -142,6 +142,7 @@ jobs:
           v -cc gcc -o api_coverage tests/api_coverage.v
           v -cc gcc -o emit_js tests/emit_js.v
           v -cc gcc -o lsp tests/lsp.v
+          v -cc gcc -o hostile tests/hostile.v
 
       # These runners print results and do not set an exit code yet, so the
       # output is checked rather than the status. That is listed as a known gap
@@ -162,6 +163,7 @@ jobs:
           ./api_coverage   | tee -a out.txt
           ./emit_js       | tee -a out.txt
           ./lsp            | tee -a out.txt
+          ./hostile        | tee -a out.txt
           if grep -qE '^FAIL|panic' out.txt; then
             echo "::error::a check failed or the machine panicked"
             exit 1

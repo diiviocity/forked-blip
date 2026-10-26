@@ -289,6 +289,14 @@ fn main() {
 		}
 		else {
 			// Allow `blip file.lip` as a shorthand for `blip run file.lip`.
+			// A word that is neither a subcommand nor a file fails both ways,
+			// and saying only "cannot read" sends someone who mistyped a
+			// subcommand hunting for a file that was never theirs.
+			if !os.exists(args[0]) && !args[0].ends_with('.lip') {
+				eprintln('blip: ${args[0]} is neither a subcommand nor a file')
+				eprintln('run `blip help` for subcommands, or `blip run <file.lip>`')
+				exit_code(2)
+			}
 			exit_code(run_files(args))
 		}
 	}

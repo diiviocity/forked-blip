@@ -47,15 +47,15 @@ enum Ctl {
 @[heap]
 pub struct Machine {
 pub mut:
-	arena     &reader.Arena
-	kstack    []blip.Kont
-	globals   blip.EnvId
-	envs      blip.EnvArena
-	prims     map[string]blip.PrimFn
-	ctl       Ctl = .eval_form
-	form      blip.NodeId
-	env       blip.EnvId
-	val       blip.Value
+	arena   &reader.Arena
+	kstack  []blip.Kont
+	globals blip.EnvId
+	envs    blip.EnvArena
+	prims   map[string]blip.PrimFn
+	ctl     Ctl = .eval_form
+	form    blip.NodeId
+	env     blip.EnvId
+	val     blip.Value
 	// val2 holds the value a `try` is going to return while its #:finally runs.
 	// One slot, not a stack: `#:finally` runs once and its own body does not
 	// touch val2.
@@ -79,6 +79,17 @@ pub mut:
 	// macros names the procedures defmacro created, so macex can tell a macro from
 	// a function without guessing from its shape.
 	macros []string
+	// The panic net's handover channels (see drive). A recovered panic writes
+	// its text to `recovered`, an honest error writes its message to
+	// `step_err`, and a finished run leaves its value in `drv_val`. Three
+	// fields rather than return-value cleverness, because V zero-value
+	// semantics make the drive-through-the-net return ambiguous: on a recovered
+	// panic the function returns its return type's zero value, and blip.Value's
+	// zero value (nil) is a MEANINGFUL value that must never be mistaken for
+	// "nothing happened".
+	recovered string
+	step_err  string
+	drv_val   blip.Value
 }
 
 // new_machine builds a machine over an arena the caller already owns. The suites
@@ -124,7 +135,6 @@ pub fn new_standalone(h host.Host) &Machine {
 	}
 	return new_machine_with(a, h)
 }
-
 
 // ---------------------------------------------------------------- the loop
 
@@ -183,8 +193,11 @@ pub fn (mut m Machine) run_checked(res reader.Forms) !blip.Value {
 		if m.src_text != '' {
 			return error(blip.format_error(m.where(), m.src_text, d.line, d.col, d.msg, 1))
 		}
-		return error('${m.where()}:${d.line}:${d.col}: ${d.msg}${
-			if res.diags.len > 1 { ' (and ${res.diags.len - 1} more)' } else { '' }}')
+		return error('${m.where()}:${d.line}:${d.col}: ${d.msg}${if res.diags.len > 1 {
+			' (and ${res.diags.len - 1} more)'
+		} else {
+			''
+		}}')
 	}
 	return m.run(res.forms)
 }
@@ -335,25 +348,77 @@ pub fn (mut m Machine) eval_string_lenient(src string) !blip.Value {
 	return last
 }
 
-
 fn (mut m Machine) drive() !blip.Value {
+	finished := m.drive_steps()
+	if !finished {
+		if m.recovered != '' {
+			// A recovered panic: a wrong call reached a Value accessor or indexed
+			// into an argument list. The message the panic carried is the honest
+			// diagnosis (which accessor, which tag), so it travels through the
+			// same decoration every other machine error gets -- an internal
+			// failure is an error, not a process death.
+			return error(m.decorate_error('internal error: ${m.recovered}'))
+		}
+		return error(m.step_err)
+	}
+	return m.drv_val
+}
+
+// drive_steps is drive's loop. It returns false for "no value: look at
+// `recovered` / `step_err`", and true for "the answer is in `drv_val`".
+//
+// The defer+recover here is the machine's safety net: a V panic anywhere
+// below this loop -- a wrong-typed call hitting a Value assert in the
+// interpreter, an out-of-range argument index in a primitive -- unwinds to
+// THIS frame, from which `recover()` turns it into an ordinary error
+// message. Without the net the same wrong call killed the whole process:
+// `(car)` exited the REPL and `({:a 1} 5)` took `blip run` down with it,
+// which is the one failure mode a configuration language cannot afford --
+// a config file must be able to say "wrong", not "abort".
+//
+// The net is at THIS boundary and nowhere else, so its cost is one function
+// call per form, not one call per step, and so machinery bugs above the
+// boundary (the reader, the emitter, the suites that call step functions
+// directly) still die loudly the way they always did.
+fn (mut m Machine) drive_steps() bool {
+	defer {
+		if code := recover() {
+			m.recovered = '${code}'
+		}
+	}
+	m.recovered = ''
+	m.step_err = ''
 	for {
 		m.steps++
 		if m.steps > m.max_steps {
-			return error('step limit exceeded: the program did not terminate')
+			m.step_err = 'step limit exceeded: the program did not terminate'
+			return false
 		}
 		if m.kstack.len > m.max_kont {
-			return error('continuation too deep: non-tail recursion is too deep')
+			m.step_err = 'continuation too deep: non-tail recursion is too deep'
+			return false
 		}
 		// Two control states, so this is an if rather than a match. V 0.5.2
 		// demands an `else` arm on a match over an enum even when every value is
 		// covered, and there is no honest third state to put there.
 		if m.ctl == .eval_form {
 			m.step_eval() or {
-				return error(m.decorate_error(err.msg()))
+				// step_eval errors were decorated in the old drive, and stay
+				// decorated here; step_return errors propagate raw, as they
+				// always did. The REPL prefixes both with `error: `, so a
+				// second decoration would read as `error: error: ...`.
+				m.step_err = m.decorate_error(err.msg())
+				return false
 			}
-		} else if !m.step_return()! {
-			return m.val
+		} else {
+			done := m.step_return() or {
+				m.step_err = err.msg()
+				return false
+			}
+			if !done {
+				m.drv_val = m.val
+				return true
+			}
 		}
 	}
 }
@@ -529,12 +594,39 @@ fn (mut m Machine) eval_symbol(name string) ! {
 // dead code for exactly the input it exists to handle.
 fn machine_builtin(name string) bool {
 	return name in [
-		'apply', 'error', 'raise', 'format', 'gensym', 'print', 'display', 'echo',
+		'apply',
+		'error',
+		'raise',
+		'format',
+		'gensym',
+		'print',
+		'display',
+		'echo',
 		'read-line',
-		'map', 'filter', 'reject', 'keep', 'fold', 'reduce', 'for-each', 'vector-map',
-		'any?', 'every?', 'sort-by', 'ok', 'err', 'ok?', 'err?', 'ok-value',
-		'err-value', 'map-result', 'unwrap-or', 'try-result', 'lazy-unwrap',
-		'lazy-map-result', 'flatten-result', 'all-results',
+		'map',
+		'filter',
+		'reject',
+		'keep',
+		'fold',
+		'reduce',
+		'for-each',
+		'vector-map',
+		'any?',
+		'every?',
+		'sort-by',
+		'ok',
+		'err',
+		'ok?',
+		'err?',
+		'ok-value',
+		'err-value',
+		'map-result',
+		'unwrap-or',
+		'try-result',
+		'lazy-unwrap',
+		'lazy-map-result',
+		'flatten-result',
+		'all-results',
 	]
 }
 
@@ -815,7 +907,6 @@ fn (mut m Machine) result_combinator(name string, args []blip.Value) ! {
 	m.ret()
 }
 
-
 fn (mut m Machine) eval_list(id blip.NodeId, kids []blip.NodeId) ! {
 	head := m.arena.node(kids[0])
 	if head.tag == .sym {
@@ -931,7 +1022,7 @@ fn (mut m Machine) step_return() !bool {
 	}
 	mut k := m.pop()
 	match k.tag {
-.app_fn {
+		.app_fn {
 			kids := m.arena.kids(k.rest)
 			if kids.len == 1 {
 				// zero arguments
@@ -1348,6 +1439,7 @@ fn (mut m Machine) eval_default(n blip.NodeId, args []blip.Value) !blip.Value {
 fn (mut m Machine) closure_from_form(n blip.NodeId) blip.Value {
 	return blip.new_closure([]string{}, n, m.env, 'default')
 }
+
 //
 // The application frame is still on the stack when the callee is applied, so this
 // is a peek rather than a stored field. A default expression must be evaluated
@@ -1529,9 +1621,9 @@ fn (mut m Machine) call_primitive(name string, args []blip.Value) ! {
 			return
 		}
 		// raise throws a value. The value may already be an `(err msg)` result -- which
-// is what `(raise (error "..."))` produces -- or a bare message.
-'raise' {
-	// `raise` unwinds to the nearest `try` rather than aborting the
+		// is what `(raise (error "..."))` produces -- or a bare message.
+		'raise' {
+			// `raise` unwinds to the nearest `try` rather than aborting the
 			// machine. With no `try` in sight it is an ordinary error, which is
 			// what makes it safe at the top level of a program.
 			//
@@ -1559,7 +1651,7 @@ fn (mut m Machine) call_primitive(name string, args []blip.Value) ! {
 			if idx < 0 {
 				return error('raised: ${msg}')
 			}
-k := m.kstack[idx]
+			k := m.kstack[idx]
 			m.kstack = m.kstack[..idx]
 			if k.expr == blip.no_node {
 				// No handler, so the error still propagates -- but #:finally runs
@@ -1583,7 +1675,7 @@ k := m.kstack[idx]
 			m.ret()
 			return
 		}
-	'print', 'display' {
+		'print', 'display' {
 			// These two are machine builtins rather than table entries because
 			// they have to reach `host` and `out`, which the prims table cannot
 			// see: PrimFn deliberately takes only its arguments, so that prims
@@ -1779,10 +1871,14 @@ k := m.kstack[idx]
 	m.val = res
 	m.ret()
 }
+
 // ------------------------------------------------------------ special forms
 
 pub fn special_form(name string) bool {
-	return name in ['quote', 'if', 'define', 'set!', 'lambda', 'fn', 'begin', 'let', 'let*', 'letrec', 'and', 'or', 'when', 'unless', 'cond', 'case', 'loop', 'dotimes', 'use', 'match', 'match*', 'import', 'struct', 'struct-out', 'provide', 'require', 'let-assert', 'do', 'time', 'assert', '->', '->>', '|>', 'as->', 'cond->', 'def', 'defmacro', 'try', 'macex', 'macex1']
+	return name in ['quote', 'if', 'define', 'set!', 'lambda', 'fn', 'begin', 'let', 'let*', 'letrec',
+		'and', 'or', 'when', 'unless', 'cond', 'case', 'loop', 'dotimes', 'use', 'match', 'match*',
+		'import', 'struct', 'struct-out', 'provide', 'require', 'let-assert', 'do', 'time', 'assert',
+		'->', '->>', '|>', 'as->', 'cond->', 'def', 'defmacro', 'try', 'macex', 'macex1']
 }
 
 fn (mut m Machine) eval_special(name string, id blip.NodeId, kids []blip.NodeId) ! {
@@ -1800,9 +1896,9 @@ fn (mut m Machine) eval_special(name string, id blip.NodeId, kids []blip.NodeId)
 			mut nf := m.kont(.if_k)
 			nf.rest = id
 			nf.env = m.env
-	nf.env = m.env
+			nf.env = m.env
 
-	m.push(nf)
+			m.push(nf)
 			m.goto(kids[1])
 			return
 		}
@@ -1841,21 +1937,19 @@ fn (mut m Machine) eval_special(name string, id blip.NodeId, kids []blip.NodeId)
 			if target.tag != .sym {
 				return error('set! needs a name')
 			}
-mut nf := m.kont(.set_k)
+			mut nf := m.kont(.set_k)
 			nf.name = target.value
 			nf.env = m.env
 			m.push(nf)
 			m.goto(kids[2])
 			return
-
 		}
 		'lambda' {
 			return m.eval_lambda(kids)
 		}
 		'fn' {
 			// (fn [x] body) is (lambda (x) body): the short form every Lisp has.
-			return m.eval_lambda([kids[0], m.make_begin(kids[1..2]),
-				m.make_begin(kids[2..])])
+			return m.eval_lambda([kids[0], m.make_begin(kids[1..2]), m.make_begin(kids[2..])])
 		}
 		'begin' {
 			if kids.len == 1 {
@@ -1869,7 +1963,7 @@ mut nf := m.kont(.set_k)
 				m.goto(kids[1])
 				return
 			}
-// No frame for the LAST statement. A `begin` that always pushed one
+			// No frame for the LAST statement. A `begin` that always pushed one
 			// made the final form a non-tail call, so a self-recursive loop grew
 			// the continuation stack by one frame per iteration and stopped being
 			// a loop at all. `next + 1 < kids.len` means "is there anything after
@@ -1890,7 +1984,7 @@ mut nf := m.kont(.set_k)
 				m.ret()
 				return
 			}
-	tag := if name == 'and' {
+			tag := if name == 'and' {
 				blip.KontTag.and_k
 			} else {
 				blip.KontTag.or_k
@@ -2167,11 +2261,11 @@ fn (mut m Machine) eval_define(kids []blip.NodeId) ! {
 // names and defaults are parallel arrays from there on.
 pub struct ParamSpec {
 pub mut:
-	names     []string
-	rest      string
-	is_rest   bool
-	opt_from  int = -1
-	opt_names []string
+	names        []string
+	rest         string
+	is_rest      bool
+	opt_from     int = -1
+	opt_names    []string
 	opt_defaults []blip.NodeId
 	// Destructuring parameters, in parameter order. Each binds a temporary -- the
 	// name it was given in `names` -- and pulls names out of it with accessors
@@ -2232,9 +2326,9 @@ pub const no_default = blip.NodeId(-2)
 // parsing failure rather than a binding failure.
 pub fn (mut m Machine) parse_params(plist []blip.NodeId, who string) !ParamSpec {
 	mut spec := ParamSpec{
-		names:        []string{},
-		opt_names:    []string{},
-		opt_defaults: []blip.NodeId{},
+		names:        []string{}
+		opt_names:    []string{}
+		opt_defaults: []blip.NodeId{}
 	}
 	mut i := 0
 	for i < plist.len {
@@ -2534,7 +2628,7 @@ fn (mut m Machine) assemble(id blip.NodeId, kids []blip.NodeId, built map[blip.N
 			// why the examples never write it.
 			return m.quasi_to_value(id)
 		}
-.list {
+		.list {
 			mut items := []blip.Value{}
 			mut ki := 0
 			for ki < kids.len {
@@ -2586,7 +2680,7 @@ fn (mut m Machine) assemble(id blip.NodeId, kids []blip.NodeId, built map[blip.N
 				ki++
 			}
 			return blip.Value{
-				tag: .array
+				tag:     .array
 				payload: &blip.Vector{
 					tag:  .array
 					data: items
@@ -2842,7 +2936,7 @@ fn (mut m Machine) transform_match_star(kids []blip.NodeId) blip.NodeId {
 		clauses << m.list_of([m.list_of(pat), m.make_begin(body)])
 		c++
 	}
-mut items := []blip.NodeId{}
+	mut items := []blip.NodeId{}
 	items << m.sym_node('match')
 	items << inner
 	mut ci := 0
@@ -2888,12 +2982,11 @@ fn (mut m Machine) transform_let_assert(kids []blip.NodeId) !blip.NodeId {
 	if bindings.len != 2 {
 		return error('let assert takes exactly one binding, written [PATTERN VALUE]')
 	}
-	fail := m.node_of('error', [m.string_node(
-		'let assert failed: the value does not match the pattern')])
-	return m.node_of('match', [bindings[1],
-		m.list_of([bindings[0], m.make_begin(kids[2..])]),
+	fail := m.node_of('error', [m.string_node('let assert failed: the value does not match the pattern')])
+	return m.node_of('match', [bindings[1], m.list_of([bindings[0], m.make_begin(kids[2..])]),
 		m.list_of([m.sym_node('_'), fail])])
 }
+
 // It is a continuation tag rather than a transform, and the reason is the one
 // thing a transform cannot do here: `use` does not know how many names to bind.
 // `(use (parse "x") a b)` binds two, `(use (commit conn) (print "done"))` binds
@@ -3423,8 +3516,10 @@ pub fn (mut m Machine) destructuring(pattern blip.NodeId, value blip.NodeId) ![]
 		mut out := []Destructured{}
 		mut i := 1
 		for i < kids.len {
-			out << m.destructuring(kids[i], m.call_node(m.sym_node('list-ref'), [value,
-				m.int_node(i64(i - 1))]))!
+			out << m.destructuring(kids[i], m.call_node(m.sym_node('list-ref'), [
+				value,
+				m.int_node(i64(i - 1)),
+			]))!
 			i++
 		}
 		return out
@@ -3489,7 +3584,11 @@ fn (mut m Machine) eval_try(kids []blip.NodeId) ! {
 		d := m.arena.node(kids[i])
 		if d.tag == .kw && (d.value == 'catch' || d.value == 'finally') {
 			if i + 1 >= kids.len {
-				return error('try: #:${d.value} needs ${if d.value == 'catch' { 'a clause' } else { 'a body' }}')
+				return error('try: #:${d.value} needs ${if d.value == 'catch' {
+					'a clause'
+				} else {
+					'a body'
+				}}')
 			}
 			if d.value == 'catch' {
 				catch = kids[i + 1]
@@ -3643,8 +3742,11 @@ pub fn (m &Machine) binding_pattern(b blip.NodeId) blip.NodeId {
 // in the examples, and making it an error here means the destructuring case does
 // not need a second implementation.
 pub fn (mut m Machine) match_clause(subject blip.NodeId, pattern blip.NodeId) blip.NodeId {
-	fail := m.node_of('error', [m.string_node('pattern did not match'), m.call_node(
-		m.sym_node('format'), [m.string_node('~a does not match ~a'), subject, pattern])])
+	fail := m.node_of('error', [m.string_node('pattern did not match'), m.call_node(m.sym_node('format'), [
+		m.string_node('~a does not match ~a'),
+		subject,
+		pattern,
+	])])
 	return m.node_of('match', [subject, m.list_of([pattern, m.sym_node('nil')]),
 		m.list_of([m.sym_node('_'), fail])])
 }
@@ -3713,7 +3815,7 @@ pub fn (mut m Machine) transform_letrec(kids []blip.NodeId) blip.NodeId {
 		stmts << m.node_of('set!', [name, m.binding_value(b)])
 		idx++
 	}
-mut bi := 2
+	mut bi := 2
 	for bi < kids.len {
 		stmts << kids[bi]
 		bi++
@@ -3777,7 +3879,7 @@ fn (mut m Machine) cond_from(items []blip.NodeId) blip.NodeId {
 
 // case => cond with `=` against the subject.
 pub fn (mut m Machine) transform_case(kids []blip.NodeId) blip.NodeId {
-subject := kids[1]
+	subject := kids[1]
 	mut items := []blip.NodeId{}
 	mut ci := 2
 	for ci < kids.len {
@@ -3812,8 +3914,10 @@ subject := kids[1]
 		mut combined := m.call_node(m.sym_node('='), [subject, tests[0]])
 		mut j := 1
 		for j < tests.len {
-			combined = m.node_of('or', [combined,
-				m.call_node(m.sym_node('='), [subject, tests[j]])])
+			combined = m.node_of('or', [combined, m.call_node(m.sym_node('='), [
+				subject,
+				tests[j],
+			])])
 			j++
 		}
 		items << m.list_of([combined, body])
@@ -3861,8 +3965,7 @@ pub fn (mut m Machine) transform_loop(kids []blip.NodeId) blip.NodeId {
 		stmts << kids[bi]
 		bi++
 	}
-	stmts << m.node_of('set!', [name, m.call_node(m.sym_node('+'), [name,
-		m.int_node(1)])])
+	stmts << m.node_of('set!', [name, m.call_node(m.sym_node('+'), [name, m.int_node(1)])])
 	stmts << m.call_node(fnname, [name])
 	body := m.make_begin(stmts)
 
@@ -3920,7 +4023,6 @@ pub fn (mut m Machine) binding_name(b blip.NodeId) blip.NodeId {
 	}
 	return b
 }
-
 
 // binding_value extracts the value expression of a binding form.
 pub fn (mut m Machine) binding_value(b blip.NodeId) blip.NodeId {
