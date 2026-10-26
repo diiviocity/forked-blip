@@ -80,6 +80,7 @@ fn main() {
 	s.check_program('csv_to_table', 'programs/csv_to_table.lip', 'csv ok')
 	s.check_program('lint_commit', 'programs/lint_commit.lip', 'lint ok')
 	s.check_program('markdown', 'programs/markdown.lip', 'markdown ok')
+	s.check_program('pratt', 'programs/pratt.lip', 'pratt ok')
 
 	if s.fails > 0 {
 		println('${s.fails} FAILURE(S)')

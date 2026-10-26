@@ -1,0 +1,124 @@
+;; programs/pratt.lip -- a Pratt parser for a tiny language.
+
+(struct Num (n))
+(struct BinOp (op left right))
+(struct Unary (op expr))
+
+(define (make-num n) (Num n))
+(define (make-bin op l r) (BinOp op l r))
+(define (make-neg e) (Unary 'neg e))
+
+(define (eval-ast e)
+  (match e
+    [(struct Num n: n) n]
+    [(struct Unary op: op expr: x) (if (= op 'neg) (- 0 (eval-ast x)) (err 'bad-op))]
+    [(struct BinOp op: op left: l right: r)
+     (cond [(= op "+") (+ (eval-ast l) (eval-ast r))]
+           [(= op "-") (- (eval-ast l) (eval-ast r))]
+           [(= op "*") (* (eval-ast l) (eval-ast r))]
+           [(= op "/") (/ (eval-ast l) (eval-ast r))]
+           [else (err 'bad-op)])]
+    [else (err 'bad-ast)]))
+
+(define (is-digit? c)
+  (let code (rune->integer (string->rune c))
+    (and (>= code 48) (<= code 57))))
+
+(define (tokenize s)
+  (tokenize-at s 0 (vector)))
+
+(define (tokenize-at s i acc)
+  (if (>= i (string-length s))
+    (array-push! acc (list 'eof nil))
+    (let c (string-slice s i (+ i 1))
+      (cond
+        [(string-blank? c) (tokenize-at s (+ i 1) acc)]
+        [(is-digit? c)
+         (let j (scan-number s i)
+           (tokenize-at s j (array-push! acc (list 'num (string->number (string-slice s i j))))))]
+        [(or (= c "+") (= c "-") (= c "*") (= c "/"))
+         (tokenize-at s (+ i 1) (array-push! acc (list 'op c)))]
+        [(= c "(") (tokenize-at s (+ i 1) (array-push! acc (list 'lparen nil)))]
+        [(= c ")") (tokenize-at s (+ i 1) (array-push! acc (list 'rparen nil)))]
+        [else (err 'bad-char)]))))
+
+(define (scan-number s i)
+  (if (or (>= i (string-length s))
+          (not (is-digit? (string-slice s i (+ i 1)))))
+    i
+    (scan-number s (+ i 1))))(define (tok-kind t) (list-ref t 0))
+(define (tok-val t) (list-ref t 1))
+
+(define (prec op)
+  (cond [(or (= op "+") (= op "-")) 1]
+        [(or (= op "*") (= op "/")) 2]
+        [else 0]))
+
+(define (parse s)
+  (let toks (tokenize s)
+    (if (err? toks)
+      toks
+      (let r (parse-expr toks 0 0)
+        (if (err? r)
+          r
+          (let ast (list-ref r 1)
+            (let pos (list-ref r 2)
+              (if (not= (tok-kind (get toks pos)) 'eof)
+                (err 'trailing-garbage)
+                (ok ast)))))))))
+
+(define (parse-expr toks pos min-prec)
+  (let r (parse-prefix toks pos)
+    (if (err? r) r
+      (parse-expr-loop toks (list-ref r 1) (list-ref r 2) min-prec))))
+
+(define (parse-prefix toks pos)
+  (if (>= pos (length toks))
+    (err 'unexpected-eof)
+    (let t (get toks pos)
+      (cond
+        [(= (tok-kind t) 'num) (ok (make-num (tok-val t)) (+ pos 1))]
+        [(= (tok-kind t) 'lparen)
+         (let r (parse-expr toks (+ pos 1) 0)
+           (if (err? r) r
+             (let ast (list-ref r 1)
+               (let p2 (list-ref r 2)
+                 (if (or (>= p2 (length toks))
+                         (not= (tok-kind (get toks p2)) 'rparen))
+                   (err 'expected-rparen)
+                   (ok ast (+ p2 1)))))))]
+        [(= (tok-kind t) 'op)
+         (if (= (tok-val t) "-")
+           (let r (parse-prefix toks (+ pos 1))
+             (if (err? r) r
+               (ok (make-neg (list-ref r 1)) (list-ref r 2))))
+           (err 'unexpected-op))]
+        [else (err 'unexpected-token)]))))(define (parse-expr-loop toks lhs pos min-prec)
+  (if (or (>= pos (length toks))
+          (not= (tok-kind (get toks pos)) 'op))
+    (ok lhs pos)
+    (let op (tok-val (get toks pos))
+      (let p (prec op)
+        (if (<= p min-prec)
+          (ok lhs pos)
+          (let r (parse-expr toks (+ pos 1) p)
+            (if (err? r) r
+              (let rhs (list-ref r 1)
+                (let p2 (list-ref r 2)
+                  (parse-expr-loop toks (make-bin op lhs rhs) p2 min-prec))))))))))
+
+(define (eval-expr s)
+  (let res (parse s)
+    (if (err? res)
+      res
+      (eval-ast (ok-value res)))))
+
+(assert (= (eval-expr "1 + 2 * 3") 7) "precedence")
+(assert (= (eval-expr "(1 + 2) * 3") 9) "parens")
+(assert (= (eval-expr "-5 + 3") -2) "unary minus")
+(assert (= (eval-expr "10 / 2 - 1") 4) "left assoc")
+(assert (err? (parse "1 +")) "trailing op is error")
+(assert (err? (parse "1 2")) "missing op is error")
+(assert (err? (parse "(1 + 2")) "unclosed paren is error")
+
+(print "pratt ok")
