@@ -25,7 +25,7 @@ FROM nixos/nix:latest
 # afterwards while `git` and `curl` were there, which is the failure this loop
 # is written to avoid.
 RUN nix-channel --update \
-    && for p in gnumake gcc git curl; do \
+    && for p in gnumake gcc git curl boehmgc; do \
            nix-env -iA nixpkgs.$p || exit 1; \
        done
 

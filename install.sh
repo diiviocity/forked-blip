@@ -36,6 +36,17 @@ if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
     exit 1
 fi
 
+# V links its own binary against Boehm GC. Without libgc-dev the build dies
+# with "Boehm GC library was not found" three minutes in.
+if ! (echo '#include <gc.h>' | cc -x c - -o /dev/null 2>/dev/null); then
+    echo "==> ERROR: Boehm GC (libgc) development files not found."
+    echo "    Debian/Ubuntu:  sudo apt install libgc-dev"
+    echo "    Fedora:         sudo dnf install gc-devel"
+    echo "    Alpine:         apk add gc-dev"
+    echo "    macOS:          brew install bdw-gc"
+    exit 1
+fi
+
 setup_v() {
     if [ -x "$V_DIR/v" ] && [ -f "$V_DIR/.blip-commit" ] \
         && [ "$(cat "$V_DIR/.blip-commit")" = "$V_COMMIT" ]; then

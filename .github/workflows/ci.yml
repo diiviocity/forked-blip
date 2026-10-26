@@ -81,6 +81,13 @@ jobs:
             gcc --version || true
             exit 1
           fi
+          # V links its own binary against Boehm GC. The runner image does not
+          # ship libgc-dev, so the `make -f Makefile v` step dies with
+          # "Boehm GC library was not found". Install it up front.
+          if ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists bdw-gc 2>/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y libgc-dev
+          fi
           git init -q v
           cd v
           git remote add origin https://github.com/vlang/v.git

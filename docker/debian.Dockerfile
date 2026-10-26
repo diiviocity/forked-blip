@@ -13,7 +13,7 @@
 FROM debian:trixie-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential git ca-certificates \
+    && apt-get install -y --no-install-recommends build-essential git ca-certificates libgc-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # The commit this project targets. Not the 0.5.2 release: vlang/v master at
