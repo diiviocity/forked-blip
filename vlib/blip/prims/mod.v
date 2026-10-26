@@ -529,6 +529,9 @@ fn seq_like(src blip.Value, items []blip.Value) blip.Value {
 }
 
 fn prim_car(args []blip.Value) !blip.Value {
+	if args.len != 1 {
+		return error('car expects 1 argument, got ${args.len}')
+	}
 	if args[0].tag != .pair {
 		return error('car expects a pair, got ${printer.write(args[0])}')
 	}
@@ -536,6 +539,9 @@ fn prim_car(args []blip.Value) !blip.Value {
 }
 
 fn prim_cdr(args []blip.Value) !blip.Value {
+	if args.len != 1 {
+		return error('cdr expects 1 argument, got ${args.len}')
+	}
 	if args[0].tag != .pair {
 		return error('cdr expects a pair, got ${printer.write(args[0])}')
 	}
@@ -781,6 +787,9 @@ fn prim_vector(args []blip.Value) !blip.Value {
 }
 
 fn prim_vector_ref(args []blip.Value) !blip.Value {
+	if args.len != 2 {
+		return error('vector-ref expects 2 arguments, got ${args.len}')
+	}
 	i := need_int('vector-ref', args[1])!
 	data := args[0].as_vector().data
 	if i < 0 || i >= data.len {
@@ -790,10 +799,19 @@ fn prim_vector_ref(args []blip.Value) !blip.Value {
 }
 
 fn prim_vector_length(args []blip.Value) !blip.Value {
+	if args.len != 1 {
+		return error('vector-length expects 1 argument, got ${args.len}')
+	}
+	if args[0].tag != .vector && args[0].tag != .array {
+		return error('vector-length expects a vector, got ${printer.write(args[0])}')
+	}
 	return blip.integer(args[0].as_vector().data.len)
 }
 
 fn prim_get(args []blip.Value) !blip.Value {
+	if args.len < 2 {
+		return error('get expects at least 2 arguments, got ${args.len}')
+	}
 	if args.len >= 3 {
 		return args[2]
 	}
@@ -811,7 +829,7 @@ fn prim_get(args []blip.Value) !blip.Value {
 			return error('get: ${err.msg()}')
 		}
 		if idx < 0 || idx >= items.len {
-			return args[2]
+			return blip.nil_value()
 		}
 		return items[idx]
 	}
@@ -819,12 +837,27 @@ fn prim_get(args []blip.Value) !blip.Value {
 }
 
 fn prim_has_key(args []blip.Value) !blip.Value {
+	if args.len != 2 {
+		return error('has-key? expects 2 arguments, got ${args.len}')
+	}
+	if args[0].tag != .table && args[0].tag != .buffer {
+		return error('has-key? expects a table, got ${printer.write(args[0])}')
+	}
 	return blip.boolean(args[0].as_table().has(need_str('has-key?', args[1])!))
 }
 
 fn prim_put(args []blip.Value) !blip.Value {
+	if args.len != 3 {
+		return error('put expects 3 arguments, got ${args.len}')
+	}
+	if args[0].tag != .table && args[0].tag != .buffer {
+		return error('put expects a table, got ${printer.write(args[0])}')
+	}
 	mut mm := args[0].as_table().values.clone()
 	mm[need_str('put', args[1])!] = args[2]
+	if args[0].tag == .buffer {
+		return blip.buffer(mm)
+	}
 	return blip.table(mm)
 }
 
