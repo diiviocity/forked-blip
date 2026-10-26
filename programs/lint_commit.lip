@@ -1,0 +1,34 @@
+;; programs/lint_commit.lip -- a commit-message linter.
+;;
+;; The first program anyone would actually install: real I/O, exit-code-shaped
+;; output, and a CLI shape worth copying. Nothing aborts: a bad message is a
+;; value, and the linter reports every problem it finds.
+
+(define (subject-ok? s)
+  (and (not (string-blank? s))
+       (<= (string-length s) 50)
+       (not (= (string-slice s (- (string-length s) 1) (string-length s)) "."))))
+
+(define (line-ok? s)
+  (<= (string-length s) 72))
+
+(define (lint text)
+  (let lines (string-split text "\n")
+    (let subject (list-ref lines 0)
+      (cond [(not (subject-ok? subject)) (err 'bad-subject)]
+            [(and (> (length lines) 1)
+                  (not (string-blank? (list-ref lines 1))))
+             (err 'missing-blank-line)]
+            [else
+             (let bad (filter (fn [l] (not (line-ok? l))) (rest (rest lines)))
+               (if (= (length bad) 0)
+                 (ok nil)
+                 (err 'line-too-long)))]))))
+
+;; ---------------------------------------------------------------- demo
+(let good "Add a commit-message linter\n\nThe linter checks subject length,\nblank line, and body width.\n"
+  (let bad "added a linter.\nno blank line here and this line is way too long xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+    (begin
+      (print "good message:" (if (ok? (lint good)) "ok" "FAIL"))
+      (print "bad message:" (if (err? (lint bad)) "rejected" "FAIL"))
+      (print "lint ok"))))

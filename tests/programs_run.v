@@ -78,6 +78,7 @@ fn main() {
 	s.check_program('json', 'programs/json.lip', 'json ok')
 	s.check_program('config', 'programs/config.lip', 'config ok')
 	s.check_program('csv_to_table', 'programs/csv_to_table.lip', 'csv ok')
+	s.check_program('lint_commit', 'programs/lint_commit.lip', 'lint ok')
 
 	if s.fails > 0 {
 		println('${s.fails} FAILURE(S)')
