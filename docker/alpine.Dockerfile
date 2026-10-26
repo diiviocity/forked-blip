@@ -48,6 +48,8 @@ RUN git config --global --add safe.directory /opt/v \
     && git clone -q https://github.com/vlang/vc vc \
     && git -C vc fetch -q --depth 1 origin "$VC_COMMIT" \
     && git -C vc checkout -q FETCH_HEAD \
+    && mkdir -p v/thirdparty/tcc/lib \
+    && cp /usr/lib/libgc.a v/thirdparty/tcc/lib/libgc.a 2>/dev/null || cp /lib/libgc.a v/thirdparty/tcc/lib/libgc.a 2>/dev/null || true \
     && make -f Makefile v VFLAGS="-d use_bundled_libgc" \
     && ./v -version
 

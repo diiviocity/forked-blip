@@ -117,6 +117,10 @@ jobs:
           # the Makefile use the bundled gc.c directly and needs no system
           # libgc at all, so the libgc-dev install above is kept as a fallback
           # for anything else that wants a shared GC.
+          # Fix: V looks for libgc.a at thirdparty/tcc/lib/libgc.a but libgc-dev
+          # installs to /usr/lib/x86_64-linux-gnu/libgc.a; copy it into place.
+          mkdir -p v/thirdparty/tcc/lib
+          cp /usr/lib/x86_64-linux-gnu/libgc.a v/thirdparty/tcc/lib/libgc.a 2>/dev/null || cp /usr/lib/libgc.a v/thirdparty/tcc/lib/libgc.a 2>/dev/null || true
           make -f Makefile v VFLAGS=-d use_bundled_libgc
           if [ ! -x ./v ]; then
             echo "::error::make succeeded but produced no ./v binary"
