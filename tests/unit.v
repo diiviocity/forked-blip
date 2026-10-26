@@ -318,7 +318,7 @@ fn (mut s Suite) machine_nodes() {
 	calln := m.call_node(m.sym_node('f'), [m.int_node(1)])
 	s.eq('call_node', m.render_node(calln), '(f 1)')
 	b := m.make_begin([m.sym_node('a')])
-		// A begin of one form needs no wrapper, and dropping it keeps the transform
+	// A begin of one form needs no wrapper, and dropping it keeps the transform
 	// output from carrying a node that only adds a stack frame.
 	s.eq('make_begin of one form', m.render_node(b), 'a')
 	s.eq('nil_node', m.render_node(m.nil_node()), 'nil')
@@ -507,8 +507,68 @@ fn (mut s Suite) lsp_api() {
 	os.rm('tmp/lsp_out.txt') or {}
 }
 
+// ---- the pinned toolchain, synced everywhere -------------------------------
+
+// install_pins is the gate for the pin itself. blip builds against ONE
+// compiler commit, and that decision is written in four places and used by
+// two audiences: ci.yml builds it in CI, install.sh / install.ps1 build it on
+// a stranger's machine, and the site/ copies are what the website hands out.
+// Drift between them is invisible until someone's install produces a broken
+// binary -- which is worse than a red suite, because nothing looks red.
+// Root scripts and site copies must therefore carry BOTH pins, exactly as
+// ci.yml spells them.
+fn (mut s Suite) install_pins() {
+	ci := os.read_file('.github/workflows/ci.yml') or {
+		s.fails++
+		println('FAIL pins => cannot read ci.yml: ${err.msg()}')
+		return
+	}
+	mut v_commit := ''
+	mut vc_commit := ''
+	for line in ci.split_into_lines() {
+		fields := line.trim_space().split(':')
+		if fields.len == 2 {
+			v := fields[0].trim_space()
+			val := fields[1].trim_space()
+			if v == 'V_COMMIT' {
+				v_commit = val
+			}
+			if v == 'VC_COMMIT' {
+				vc_commit = val
+			}
+		}
+	}
+	s.record('ci.yml pins V', v_commit.len == 40, v_commit)
+	s.record('ci.yml pins vc', vc_commit.len == 40, vc_commit)
+	for path in ['install.sh', 'install.ps1', 'site/install.sh', 'site/install.ps1'] {
+		src := os.read_file(path) or {
+			s.fails++
+			println('FAIL pins => cannot read ${path}: ${err.msg()}')
+			continue
+		}
+		s.record('${path} pins V', src.contains(v_commit), if src.contains(v_commit) {
+			v_commit
+		} else {
+			'MISSING'
+		})
+		s.record('${path} pins vc', src.contains(vc_commit), if src.contains(vc_commit) {
+			vc_commit
+		} else {
+			'MISSING'
+		})
+		// An unpinned fallback is the bug this gate exists for: a script that
+		// also clones V at HEAD would work today and break next week, so the
+		// literal "clone vlang/v then make" must not appear even WITH the pin
+		// present. (The remote add + fetch at a commit, which the pinned
+		// recipes use, does not match this literal.)
+		s.record('${path} clones V only at a pin', !src.contains('git clone https://github.com/vlang/v '),
+			'checked')
+	}
+}
+
 fn main() {
 	mut s := Suite{}
+	s.install_pins()
 	s.constructors()
 	s.accessors()
 	s.predicates()

@@ -29,20 +29,20 @@ pub enum Tag {
 	boolean
 	integer
 	float
-	rune      // code point, in `i`
+	rune // code point, in `i`
 	string
-	symbol    // interned string
-	keyword   // interned string, self-evaluating, callable
+	symbol  // interned string
+	keyword // interned string, self-evaluating, callable
 	pair
 	emptylist // the empty list: a sequence of length zero
 	vector
-	array     // mutable vector
-	table     // immutable map
-	buffer    // mutable map
+	array  // mutable vector
+	table  // immutable map
+	buffer // mutable map
 	closure
 	primitive
 	continuation
-	struct_   // a struct instance; the constructor name is in the payload
+	struct_ // a struct instance; the constructor name is in the payload
 }
 
 // NodeId indexes the reader's flat arena. It lives here rather than in the
@@ -328,7 +328,7 @@ pub fn rune(r u32) Value {
 
 pub fn string(s string) Value {
 	return Value{
-		tag: .string
+		tag:     .string
 		payload: &StringPayload{
 			tag: .string
 			s:   s
@@ -338,7 +338,7 @@ pub fn string(s string) Value {
 
 pub fn symbol(name string) Value {
 	return Value{
-		tag: .symbol
+		tag:     .symbol
 		payload: &StringPayload{
 			tag: .symbol
 			s:   name
@@ -348,7 +348,7 @@ pub fn symbol(name string) Value {
 
 pub fn keyword(name string) Value {
 	return Value{
-		tag: .keyword
+		tag:     .keyword
 		payload: &StringPayload{
 			tag: .keyword
 			s:   name
@@ -358,7 +358,7 @@ pub fn keyword(name string) Value {
 
 pub fn cons(car Value, cdr Value) Value {
 	return Value{
-		tag: .pair
+		tag:     .pair
 		payload: &Pair{
 			tag: .pair
 			car: car
@@ -385,7 +385,7 @@ pub fn list_from(items []Value) Value {
 
 pub fn vector(items []Value) Value {
 	return Value{
-		tag: .vector
+		tag:     .vector
 		payload: &Vector{
 			tag:  .vector
 			data: items
@@ -395,7 +395,7 @@ pub fn vector(items []Value) Value {
 
 pub fn table(m map[string]Value) Value {
 	return Value{
-		tag: .table
+		tag:     .table
 		payload: &Table{
 			tag:    .table
 			values: m
@@ -405,7 +405,7 @@ pub fn table(m map[string]Value) Value {
 
 pub fn buffer(m map[string]Value) Value {
 	return Value{
-		tag: .buffer
+		tag:     .buffer
 		payload: &Table{
 			tag:    .buffer
 			values: m
@@ -414,52 +414,79 @@ pub fn buffer(m map[string]Value) Value {
 }
 
 // ---- accessors -------------------------------------------------------------
+//
+// Every accessor type-checks, and does so with a RECOVERABLE panic rather
+// than an `assert`: V asserts are not catchable -- the process dies with the
+// printout and no defer can intercept -- while `panic(...)` unwinds to the
+// machine's drive loop, from which a wrong call reaches the user as an
+// ordinary error naming the accessor and the tag it met ("internal error:
+// as_table: called on a integer, not a table"). The distinction matters for
+// the configuration use case, where a program that says "wrong type" and
+// keeps going is usable and one that aborts is not.
+
+fn tag_name(t Tag) string {
+	return '${t}'.replace('Tag.', '')
+}
 
 @[inline]
 pub fn (v Value) as_int() i64 {
-	assert v.tag == .integer || v.tag == .rune
+	if v.tag != .integer && v.tag != .rune {
+		panic('as_int: called on a ${tag_name(v.tag)}, not an integer')
+	}
 	return v.i
 }
 
 @[inline]
 pub fn (v Value) as_float() f64 {
-	assert v.tag == .float
+	if v.tag != .float {
+		panic('as_float: called on a ${tag_name(v.tag)}, not a float')
+	}
 	return v.f
 }
 
 @[inline]
 pub fn (v Value) as_bool() bool {
-	assert v.tag == .boolean
+	if v.tag != .boolean {
+		panic('as_bool: called on a ${tag_name(v.tag)}, not a boolean')
+	}
 	return v.i != 0
 }
 
 @[inline]
 pub fn (v Value) as_string() string {
-	assert v.tag in [.string, .symbol, .keyword, .primitive]
+	if v.tag !in [.string, .symbol, .keyword, .primitive] {
+		panic('as_string: called on a ${tag_name(v.tag)}, not a string')
+	}
 	return (v.payload as &StringPayload).s
 }
 
 @[inline]
 pub fn (v Value) as_pair() &Pair {
-	assert v.tag == .pair
+	if v.tag != .pair {
+		panic('as_pair: called on a ${tag_name(v.tag)}, not a pair')
+	}
 	return v.payload as &Pair
 }
 
 @[inline]
 pub fn (v Value) as_vector() &Vector {
-	assert v.tag == .vector || v.tag == .array
+	if v.tag != .vector && v.tag != .array {
+		panic('as_vector: called on a ${tag_name(v.tag)}, not a vector')
+	}
 	return v.payload as &Vector
 }
 
 @[inline]
 pub fn (v Value) as_table() &Table {
-	assert v.tag == .table || v.tag == .buffer
+	if v.tag != .table && v.tag != .buffer {
+		panic('as_table: called on a ${tag_name(v.tag)}, not a table')
+	}
 	return v.payload as &Table
 }
 
 pub fn struct_value(name string, fields []string, vals map[string]Value) Value {
 	return Value{
-		tag: .struct_
+		tag:     .struct_
 		payload: &StructVal{
 			name:   name
 			fields: fields
@@ -470,7 +497,9 @@ pub fn struct_value(name string, fields []string, vals map[string]Value) Value {
 
 @[inline]
 pub fn (v Value) as_struct() &StructVal {
-	assert v.tag == .struct_
+	if v.tag != .struct_ {
+		panic('as_struct: called on a ${tag_name(v.tag)}, not a struct')
+	}
 	return v.payload as &StructVal
 }
 
@@ -618,7 +647,7 @@ pub fn (c &Closure) payload_tag() Tag {
 
 pub fn new_closure(params []string, body NodeId, env EnvId, name string) Value {
 	return Value{
-		tag: .closure
+		tag:     .closure
 		payload: &Closure{
 			params: params
 			body:   body
@@ -634,15 +663,15 @@ pub fn new_closure(params []string, body NodeId, env EnvId, name string) Value {
 // ordinary parameter.
 pub fn new_rest_closure(params []string, rest_name string, body NodeId, env EnvId, name string) Value {
 	return Value{
-		tag: .closure
+		tag:     .closure
 		payload: &Closure{
-			params:     params,
-			body:       body,
-			env:        env,
-			name:       name,
-			arity:      params.len,
-			rest:       true,
-			rest_name:  rest_name,
+			params:    params
+			body:      body
+			env:       env
+			name:      name
+			arity:     params.len
+			rest:      true
+			rest_name: rest_name
 		}
 	}
 }
@@ -650,15 +679,15 @@ pub fn new_rest_closure(params []string, rest_name string, body NodeId, env EnvI
 // labelled builds the closure for a parameter list that has labelled parameters.
 pub fn labelled(params []string, body NodeId, env EnvId, name string, opt_from int, opt_names []string, opt_defaults []NodeId) Value {
 	return Value{
-		tag: .closure
+		tag:     .closure
 		payload: &Closure{
-			params:      params
-			body:        body
-			env:         env
-			name:        name
-			arity:       params.len
-			opt_from:    opt_from
-			opt_names:   opt_names
+			params:       params
+			body:         body
+			env:          env
+			name:         name
+			arity:        params.len
+			opt_from:     opt_from
+			opt_names:    opt_names
 			opt_defaults: opt_defaults
 		}
 	}
@@ -666,7 +695,9 @@ pub fn labelled(params []string, body NodeId, env EnvId, name string, opt_from i
 
 @[inline]
 pub fn (v Value) as_closure() &Closure {
-	assert v.tag == .closure
+	if v.tag != .closure {
+		panic('as_closure: called on a ${tag_name(v.tag)}, not a closure')
+	}
 	return v.payload as &Closure
 }
 
@@ -679,7 +710,7 @@ pub type PrimFn = fn (args []Value) !Value
 // machine's table keyed by that name.
 pub fn new_prim(name string) Value {
 	return Value{
-		tag: .primitive
+		tag:     .primitive
 		payload: &StringPayload{
 			tag: .primitive
 			s:   name
@@ -694,21 +725,21 @@ pub fn new_prim(name string) Value {
 @[flag]
 pub enum KontTag {
 	done
-	app_fn // operator evaluated; arguments remain
+	app_fn  // operator evaluated; arguments remain
 	app_arg // evaluating one argument
-	if_k // evaluating an if test
-	seq // begin: more expressions remain
+	if_k    // evaluating an if test
+	seq     // begin: more expressions remain
 	define_k
 	set_k
 	and_k
 	or_k
-	field_k // p.y := value, building the new instance
-	assert_k // (assert test message)
-	use_k // binding the values of an ok Result
-	match_k // choosing a match clause
-	guard_k // evaluating a #:when guard
+	field_k   // p.y := value, building the new instance
+	assert_k  // (assert test message)
+	use_k     // binding the values of an ok Result
+	match_k   // choosing a match clause
+	guard_k   // evaluating a #:when guard
 	collect_k // evaluating the elements of a vector, table or array literal
-	try_k // `try`: running one body form, or its #:finally
+	try_k     // `try`: running one body form, or its #:finally
 }
 
 pub struct Kont {
@@ -716,7 +747,7 @@ pub mut:
 	tag  KontTag
 	expr NodeId // the form being evaluated when this frame was pushed
 	env  EnvId
-	slot int // which child or argument index
+	slot int    // which child or argument index
 	rest NodeId // the enclosing form
 	acc  []Value
 	name string
