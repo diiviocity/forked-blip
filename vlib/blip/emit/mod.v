@@ -341,6 +341,10 @@ fn (mut e Emitter) special(name string, id reader.NodeId, kids []reader.NodeId) 
 		e.emit('${e.value(id)};')
 		return true
 	}
+	if name == 'try' {
+		e.emit('${e.value(id)};')
+		return true
+	}
 	if name == 'quote' {
 		e.emit('${e.value(kids[1])};')
 		return true
@@ -443,7 +447,7 @@ fn (mut e Emitter) special(name string, id reader.NodeId, kids []reader.NodeId) 
 // to emit nothing and look like a silent success.
 const unsupported_forms = ['loop', 'dotimes',
 	'struct', 'require', 'provide',
-	'try', 'do', 'defmacro', 'macex', 'macex1', 'as->',
+	'do', 'defmacro', 'macex', 'macex1', 'as->',
 	'cond->', 'import', 'quasiquote', 'unquote', 'unquote-splicing']
 
 fn (mut e Emitter) emit_define(kids []reader.NodeId) {
@@ -1065,6 +1069,9 @@ if (name == 'fn' || name == 'lambda') && kids.len >= 2 {
 	if name == 'use' && kids.len >= 2 {
 		return e.use_expr(kids)
 	}
+	if name == 'try' {
+		return e.try_expr(kids)
+	}
 	// The threading macros. `->` puts the value FIRST in every step, `->>` puts it
 	// LAST, and a bare symbol step is a call with the value alone:
 	//   (->> [1 2 3] (vector-map f) vector-rev)  =  (vector-rev (vector-map f [1 2 3]))
@@ -1648,7 +1655,7 @@ fn (mut e Emitter) match_expr(kids []reader.NodeId) string {
 		mut guard := ''
 		// A guard may lead the clause or follow the pattern; machine/mod.v reads
 		// both now, and the example writes the trailing one.
-		if e.node(parts[0]).tag == .kw && e.node(parts[0]).value == '#:when' {
+		if e.node(parts[0]).tag == .kw && e.node(parts[0]).value == 'when' {
 			if parts.len < 2 {
 				e.refuse('match guard')
 				return 'null'
@@ -1688,7 +1695,7 @@ fn (mut e Emitter) match_expr(kids []reader.NodeId) string {
 		// the primitive -- so the scope goes up before either is emitted, not
 		// after.
 		mark := e.push_locals(p.names)
-		if pi < parts.len && e.node(parts[pi]).tag == .kw && e.node(parts[pi]).value == '#:when' {
+		if pi < parts.len && e.node(parts[pi]).tag == .kw && e.node(parts[pi]).value == 'when' {
 			if pi + 1 >= parts.len {
 				e.pop_locals(mark)
 				e.refuse('match guard')
@@ -1733,6 +1740,180 @@ fn (mut e Emitter) match_expr(kids []reader.NodeId) string {
 // compared as true, and every `cond` took its first branch. A binding value
 // emitted in tail position was a thunk too, so the binding held a function and
 // the first use of it failed somewhere else entirely.
+fn (mut e Emitter) try_expr(kids []reader.NodeId) string {
+	// Parse body / catch / finally the way eval_try does: walk the kids,
+	// peeling off #:catch and #:finally (written as #:catch / #:finally) and
+	// collecting everything else into the body.
+	mut body := []reader.NodeId{}
+	mut catch_id := reader.NodeId(-1)
+	mut finally_id := reader.NodeId(-1)
+	mut i := 1
+	for i < kids.len {
+		d := e.node(kids[i])
+		if d.tag == .kw && (d.value == 'catch' || d.value == 'finally') {
+			if i + 1 >= kids.len {
+				e.refuse('try')
+				return 'null'
+			}
+			if d.value == 'catch' {
+				catch_id = kids[i + 1]
+			} else {
+				finally_id = kids[i + 1]
+			}
+			i += 2
+			continue
+		}
+		body << kids[i]
+		i++
+	}
+	if body.len == 0 {
+		e.refuse('try')
+		return 'null'
+	}
+
+	e.gensym++
+	n := e.gensym
+	res_var := '__blip_try${n}'
+	err_var := '__blip_err${n}'
+	subj_var := '__blip_subject${n}'
+	msg_var := '__blip_msg${n}'
+
+	// Body: all forms but the last as statements, the last captured.
+	mut saved_out := e.out.clone()
+	e.out = []string{}
+	for j in 0 .. body.len - 1 {
+		e.stmt(body[j])
+	}
+	e.out << '${res_var} = ${e.test_of(body[body.len - 1])};'
+	body_js := e.out.join('\n')
+	e.out = saved_out
+
+	// Catch: a single clause (a vector/list of pattern + body forms, with an
+	// optional leading or trailing #:when guard).
+	mut catch_js := ''
+	if catch_id != -1 {
+		parts := e.kids(catch_id)
+		mut pi := 0
+		mut guard := ''
+		if parts.len > 0 && e.node(parts[0]).tag == .kw && e.node(parts[0]).value == 'when' {
+			if parts.len < 2 {
+				e.refuse('try guard')
+				return 'null'
+			}
+			guard = e.value(parts[1])
+			pi = 2
+		}
+		if pi >= parts.len {
+			e.refuse('try catch')
+			return 'null'
+		}
+		p := e.pattern(parts[pi])
+		if !p.ok {
+			return 'null'
+		}
+		pi++
+		if pi < parts.len && e.node(parts[pi]).tag == .kw && e.node(parts[pi]).value == 'when' {
+			if pi + 1 >= parts.len {
+				e.refuse('try guard')
+				return 'null'
+			}
+			guard = e.value(parts[pi + 1])
+			pi += 2
+		}
+		mut catch_body_forms := []reader.NodeId{}
+		for b in pi .. parts.len {
+			catch_body_forms << parts[b]
+		}
+		saved_out = e.out.clone()
+		e.out = []string{}
+		for b in catch_body_forms {
+			e.stmt(b)
+		}
+		catch_body_js := e.out.join('\n')
+		e.out = saved_out
+
+		mut c_lines := []string{}
+		c_lines << 'const ${subj_var} = ${err_var}.blip_raise ? ${err_var}.blip_raise.subject : ${err_var};'
+		c_lines << 'const ${msg_var} = ${err_var}.blip_raise ? ${err_var}.blip_raise.msg : String(${err_var});'
+		c_lines << 'const __blip_pm${n} = pat_match(${p.js}, ${subj_var});'
+		c_lines << 'if (__blip_pm${n} !== "no") {'
+		for nm in p.names {
+			c_lines << '  const ${nm} = __blip_pm${n}["${nm}"];'
+		}
+		mut guard_cond := 'true'
+		if guard != '' {
+			guard_cond = 'blip_truthy(${guard})'
+		}
+		c_lines << '  if (${guard_cond}) {'
+		if catch_body_js != '' {
+			for line in catch_body_js.split('\n') {
+				if line.trim_space() != '' {
+					c_lines << '    ' + line
+				}
+			}
+		}
+		c_lines << '    return blip.err(${msg_var});'
+		c_lines << '  }'
+		c_lines << '}'
+		c_lines << 'throw ${err_var};'
+		catch_js = c_lines.join('\n')
+	} else {
+		catch_js = 'throw ${err_var};'
+	}
+
+	// Finally: its node is usually a vector/list whose elements are the forms.
+	mut finally_js := ''
+	if finally_id != -1 {
+		mut fforms := []reader.NodeId{}
+		d := e.node(finally_id)
+		if d.tag == .list || d.tag == .vector {
+			fforms = e.kids(finally_id)
+		} else {
+			fforms << finally_id
+		}
+		saved_out = e.out.clone()
+		e.out = []string{}
+		for f in fforms {
+			e.stmt(f)
+		}
+		finally_js = e.out.join('\n')
+		e.out = saved_out
+	}
+
+	mut lines := []string{}
+	lines << '(() => {'
+	lines << '  let ${res_var};'
+	lines << '  try {'
+	if body_js.trim_space() != '' {
+		for line in body_js.split('\n') {
+			if line.trim_space() != '' {
+				lines << '    ' + line
+			}
+		}
+	}
+	lines << '  } catch (${err_var}) {'
+	for line in catch_js.split('\n') {
+		if line.trim_space() != '' {
+			lines << '    ' + line
+		}
+	}
+	lines << '  }'
+	if finally_id != -1 {
+		lines << '  finally {'
+		if finally_js.trim_space() != '' {
+			for line in finally_js.split('\n') {
+				if line.trim_space() != '' {
+					lines << '    ' + line
+				}
+			}
+		}
+		lines << '  }'
+	}
+	lines << '  return ${res_var};'
+	lines << '})()'
+	return lines.join('\n')
+}
+
 fn (mut e Emitter) test_of(id reader.NodeId) string {
 	saved := e.tail
 	e.tail = 0
@@ -2267,6 +2448,8 @@ fn mangle(name string) string {
 		// bare `ok` is an identifier nothing defines.
 		'ok' { return 'ok' }
 		'err' { return 'err' }
+		'error' { return 'error' }
+		'raise' { return 'raise' }
 		'ok?' { return 'ok_q' }
 		'err?' { return 'err_q' }
 		'ok-value' { return 'ok_value' }
@@ -2386,6 +2569,8 @@ const prim_names = {
 		'number->string': true
 		'ok':             true
 		'err':            true
+		'error':          true
+		'raise':          true
 		'ok?':            true
 		'err?':           true
 		'ok-value':       true
