@@ -104,6 +104,19 @@ read, and anything the reader reports -- an unclosed bracket, a stray close, an
 unterminated string -- becomes a diagnostic at the position the reader itself
 reported. There is no type checking and no go-to-definition yet.')
 		}
+		'lint' {
+			println('blip lint [file] -- lint a commit message
+
+Reads the message from <file> (or COMMIT_EDITMSG in the current directory
+when no file is given) and checks the subject length, the blank line after
+the subject, and the body width. Exits 0 when the message is clean and 1
+when it is not, so it works as a git commit-msg hook:
+
+  blip lint .git/COMMIT_EDITMSG
+
+The rules live in programs/lint_commit.lip, which is also runnable on its
+own: blip run programs/lint_commit.lip')
+		}
 		'new' {
 			println('blip new <name> -- scaffold a project
 
@@ -160,6 +173,17 @@ fn std_path() string {
 	return ''
 }
 
+fn programs_path(name string) string {
+	exe := os.executable()
+	dir := os.dir(exe)
+	for candidate in [os.join_path(dir, 'programs${os.path_separator}${name}'),
+		os.join_path(os.dir(dir), 'programs${os.path_separator}${name}')] {
+		if os.exists(candidate) {
+			return candidate
+		}
+	}
+	return ''
+}
 fn run_files(paths []string) int {
 	h := &host.ConsoleHost{}
 	mut m := machine.new_standalone(h)
@@ -265,6 +289,25 @@ fn main() {
 		}
 		'lsp' {
 			lsp.serve()
+		}
+		'lint' {
+			mut file := 'COMMIT_EDITMSG'
+			if args.len >= 2 {
+				file = args[1]
+			}
+			if !os.exists(file) {
+				eprintln('blip: cannot read ${file}')
+				exit_code(2)
+				return
+			}
+			os.setenv('BLIP_LINT_FILE', file, true)
+			prog := programs_path('lint_commit.lip')
+			if prog == '' {
+				eprintln('blip: cannot find programs/lint_commit.lip')
+				exit_code(2)
+				return
+			}
+			exit_code(run_files([prog]))
 		}
 		'new' {
 			if args.len < 2 {
