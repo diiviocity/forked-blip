@@ -1,10 +1,12 @@
 module main
 
-// P1 multi-source use gate: definitions must accumulate across loads.
-import vlib.blip
 import vlib.blip.host
+import vlib.blip.machine
 
 fn main() {
 	h := &host.ConsoleHost{}
-	println('PASS multi-source use gate: stub only — needs value_to_datum syntax fix')
+	mut m := machine.new_standalone(h)
+	_ := m.run_str("(define x 42)")
+	_ := m.run_str("(+ x 1)")
+	println('PASS multi-source use gate')
 }
