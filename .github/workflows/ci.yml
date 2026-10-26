@@ -72,6 +72,7 @@ jobs:
         if: steps.vcache.outputs.cache-hit != 'true'
         run: |
           set -e
+          set -o pipefail
           # No release archive: the prebuilt ones are a different compiler, and
           # installing only the executable out of one leaves V unable to find
           # the vlib beside it. Build the pinned commit instead.
@@ -119,12 +120,18 @@ jobs:
           # for anything else that wants a shared GC.
           # Fix: V looks for libgc.a at thirdparty/tcc/lib/libgc.a but libgc-dev
           # installs to /usr/lib/x86_64-linux-gnu/libgc.a; copy it into place.
-          mkdir -p v/thirdparty/tcc/lib
-          cp /usr/lib/x86_64-linux-gnu/libgc.a v/thirdparty/tcc/lib/libgc.a 2>/dev/null || cp /usr/lib/libgc.a v/thirdparty/tcc/lib/libgc.a 2>/dev/null || true
-          make -f Makefile v VFLAGS=-d use_bundled_libgc
+          # NOTE: we already did `cd v` above, so these paths are relative to
+          # the V checkout (not `v/...`).
+          mkdir -p thirdparty/tcc/lib
+          cp /usr/lib/x86_64-linux-gnu/libgc.a thirdparty/tcc/lib/libgc.a 2>/dev/null || cp /usr/lib/libgc.a thirdparty/tcc/lib/libgc.a 2>/dev/null || true
+          make -f Makefile v VFLAGS=-d use_bundled_libgc 2>&1 | tee build.log
           if [ ! -x ./v ]; then
-            echo "::error::make succeeded but produced no ./v binary"
+            echo "::error::Build V failed — see build.log"
+            cat build.log || true
+            echo "--- dir contents ---"
             ls -la
+            echo "--- libgc check ---"
+            ls -la thirdparty/tcc/lib/libgc.a 2>/dev/null || echo "libgc.a missing"
             exit 1
           fi
           ./v version
