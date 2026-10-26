@@ -124,7 +124,7 @@ fn (mut s Suite) check_example(name string) {
 		println('FAIL ${name} => cannot read ${path}')
 		return
 	}
-	res := emit.compile_program(src) or {
+	res := emit.compile_file(path) or {
 		s.fails++
 		println('FAIL ${name} => emit failed: ${err.msg()}')
 		return
@@ -234,7 +234,7 @@ fn (mut s Suite) real_programs() {
 		src := os.read_file(path) or {
 			continue
 		}
-		res := emit.compile_program(src) or {
+		res := emit.compile_file(path) or {
 			refused << '${ex}: ${err.msg()}'
 			continue
 		}

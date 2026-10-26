@@ -46,17 +46,37 @@ pub fn compile_program(src string) !Result {
 
 // compile turns blip source into a JavaScript module.
 pub fn compile(src string) !Result {
+	return compile_with_base(src, '')
+}
+
+// compile_file compiles one file, resolving `require` relative to its own
+// directory, the way `blip run file` does.
+pub fn compile_file(path string) !Result {
+	src := os.read_file(path) or {
+		return error('cannot read ${path}: ${err.msg()}')
+	}
+	std_src := os.read_file('lib/std.lip') or {
+		return error('cannot read lib/std.lip: ${err.msg()}')
+	}
+	return compile_with_base(std_src + '\n' + src, os.dir(path))
+}
+
+// compile_with_base is the real implementation: `base` is the directory the
+// source lives in, used to resolve `require`.
+pub fn compile_with_base(src string, base string) !Result {
 	res := reader.read_all(src)
 	if res.diags.len > 0 {
 		d := res.diags[0]
 		return error('${d.line}:${d.col}: ${d.msg}')
 	}
 	mut e := Emitter{
-		arena:    res.arena
-		top:      map[string]bool{}
-		mangled:  map[string]string{}
-		collided: map[string]string{}
-		takes_kwargs: map[string]bool{}
+		arena:         res.arena
+		top:           map[string]bool{}
+		mangled:       map[string]string{}
+		collided:      map[string]string{}
+		takes_kwargs:  map[string]bool{}
+		base:          base
+		loaded:        map[string]bool{}
 	}
 	// Two passes, because a function may refer to a name defined later in the
 	// file -- ordinary in blip, impossible in a `const` declaration.
@@ -136,6 +156,14 @@ mut:
 	// collapse. That matches how blip itself reads (define before use) and is
 	// recorded rather than worked around.
 	takes_kwargs map[string]bool
+	// base is the directory the source being compiled lives in, so a
+	// `require "lib/x.vl"` resolves next to THIS file rather than next to
+	// the process's working directory -- the same rule resolve_path uses in
+	// the machine.
+	base    string
+	// loaded remembers which module paths have already been inlined, so a
+	// file required twice is emitted once.
+	loaded map[string]bool
 }
 
 // push_local records one binding under its blip name and the identifier that
@@ -285,6 +313,15 @@ fn (mut e Emitter) form(id reader.NodeId) {
 }
 
 fn (mut e Emitter) special(name string, id reader.NodeId, kids []reader.NodeId) bool {
+	if name == 'provide' {
+		// `provide` documents a module's interface; the machine treats it as a
+		// no-op. The emitter agrees: nothing is emitted for it.
+		return true
+	}
+	if name == 'require' {
+		e.require_form(kids)
+		return true
+	}
 	if name == 'define' || name == 'def' {
 		e.emit_define(kids)
 		return true
@@ -446,7 +483,7 @@ fn (mut e Emitter) special(name string, id reader.NodeId, kids []reader.NodeId) 
 // is skipped before the special-form dispatch runs, so a top-level `match` used
 // to emit nothing and look like a silent success.
 const unsupported_forms = ['loop', 'dotimes',
-	'struct', 'require', 'provide',
+	'struct',
 	'do', 'defmacro', 'macex', 'macex1', 'as->',
 	'cond->', 'import', 'quasiquote', 'unquote', 'unquote-splicing']
 
@@ -472,7 +509,7 @@ fn (mut e Emitter) emit_define(kids []reader.NodeId) {
 		// ordinary blip, and JavaScript throws on an assignment to a `const`.
 		// The mangling matches every other use of the name, so a definition and a
 		// `set!` cannot disagree.
-		e.emit('let ${e.mangle_name(sig.value)} = ${e.value(kids[2])};')
+		e.emit('var ${e.mangle_name(sig.value)} = ${e.value(kids[2])};')
 		return
 	}
 	e.refuse('define')
@@ -909,6 +946,13 @@ fn (mut e Emitter) value(id reader.NodeId) string {
 // being a chain of branches that each return, which the compiler reads as
 // unreachable code after the first unconditional one.
 fn (mut e Emitter) expression_form(name string, kids []reader.NodeId) ?string {
+	if name == 'require' {
+		e.require_form(kids)
+		return 'null'
+	}
+	if name == 'provide' {
+		return 'null'
+	}
 	if name == 'quote' {
 		if kids.len < 2 {
 			return none
@@ -2703,4 +2747,114 @@ fn escape_all(s string) string {
 // json_str wraps escape_all in the quotes the emitted JavaScript needs.
 fn json_str(s string) string {
 	return '"${escape_all(s)}"'
+}// ------------------------------------------------------------------ modules
+//
+// `require` loads (evaluates) another file into the current machine. The
+// emitter mirrors that: it reads the file, compiles it with the same base
+// directory, and splices its top-level statements in place, so the names it
+// defines are available to the rest of the module. `provide` is a no-op in
+// the machine and stays a no-op here. Filters (only-in, prefix-in) are
+// accepted and ignored, matching the machine: it loads the whole file.
+
+fn (mut e Emitter) require_form(kids []reader.NodeId) {
+	paths := e.collect_paths(kids[1..])
+	mut k := 0
+	for k < paths.len {
+		full := e.resolve_path(paths[k])
+		if full in e.loaded {
+			k++
+			continue
+		}
+		e.loaded[full] = true
+		src := os.read_file(full) or {
+			e.refuse('require')
+			k++
+			continue
+		}
+		dir := os.dir(full)
+		body := e.compile_module(src, dir) or {
+			e.refuse('require')
+			k++
+			continue
+		}
+		for line in body {
+			e.out << line
+		}
+		k++
+	}
+}
+
+fn (mut e Emitter) collect_paths(nodes []reader.NodeId) []string {
+	mut out := []string{}
+	mut i := 0
+	for i < nodes.len {
+		d := e.node(nodes[i])
+		if d.tag == .str {
+			out << d.value
+		} else if d.tag == .list {
+			kids := e.kids(nodes[i])
+			mut j := 0
+			for j < kids.len {
+				part := e.collect_paths([kids[j]])
+				mut p := 0
+				for p < part.len {
+					out << part[p]
+					p++
+				}
+				j++
+			}
+		}
+		i++
+	}
+	return out
+}
+
+fn (mut e Emitter) resolve_path(path string) string {
+	if path.starts_with('/') || path.starts_with('.') || e.base == '' {
+		return path
+	}
+	mut cut := -1
+	mut i := 0
+	for i < e.base.len {
+		c := e.base[i]
+		if c == `/` || c == `\\` {
+			cut = i
+		}
+		i++
+	}
+	if cut < 0 {
+		if e.base == '' {
+			return path
+		}
+		return e.base + '/' + path
+	}
+	return e.base[..cut] + '/' + path
+}
+
+fn (mut e Emitter) compile_module(src string, base string) ![]string {
+	res := reader.read_all(src)
+	if res.diags.len > 0 {
+		return error('module has diagnostics')
+	}
+	mut me := Emitter{
+		arena:        res.arena
+		top:          map[string]bool{}
+		mangled:      map[string]string{}
+		collided:     map[string]string{}
+		takes_kwargs: map[string]bool{}
+		base:         base
+		loaded:       e.loaded
+	}
+	for id in res.forms {
+		me.remember(id)
+	}
+	for id in res.forms {
+		me.form(id)
+	}
+	if me.blocked.len > 0 {
+		for b in me.blocked {
+			e.refuse(b)
+		}
+	}
+	return me.out.clone()
 }
