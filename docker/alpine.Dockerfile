@@ -48,7 +48,7 @@ RUN git config --global --add safe.directory /opt/v \
     && git clone -q https://github.com/vlang/vc vc \
     && git -C vc fetch -q --depth 1 origin "$VC_COMMIT" \
     && git -C vc checkout -q FETCH_HEAD \
-    && make -f Makefile v \
+    && make -f Makefile v VFLAGS="-d use_bundled_libgc" \
     && ./v -version
 
 ENV PATH=/opt/v:$PATH

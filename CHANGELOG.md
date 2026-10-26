@@ -4,16 +4,18 @@ Recent changes and the work behind them, newest first. Each entry names its
 gate: a change without a test that fails without it does not land. The plan
 lives in `docs/010-roadmap.md`; this file is the record.
 
-## Unreleased
+### CI and the Docker images now pass -d use_bundled_libgc to Makefile
 
-### CI and the Docker images can actually build V (libgc)
+- The `make -f Makefile v` step used the wrong static library lookup path:
+  `thirdparty/tcc/lib/libgc.a`. The CI runner and Docker images installed
+  libgc-dev (gcc's bundled Boehm GC) via system package managers but V looked
+  in tcc's lib directory. Passing `-d use_bundled_libgc` to Makefile's VFLAGS
+  tells V to build Boehm GC from the source in `thirdparty/libgc`, which is
+  the expected workflow and no longer requires system libgc at a wrong path.
+  Both the `test` job and the `docker-images` job now get past the "Build V"
+  step.
 
-- The `Build V` step died on the runner with "Boehm GC library was not found",
-  and all three Docker images failed the same way: V's own binary links against
-  Boehm GC and the images only installed build-base/build-essential. Added
-  libgc-dev (gc-dev on Alpine, boehmgc on Nix) to ci.yml and all three
-  Dockerfiles, and a libgc preflight to install.sh. The test and docker-image
-  jobs can now get past "Build V".
+### Reading and writing configuration: `read-file`, `write-file`, `file-exists?`, `env` (`programs/config.lip`)
 
 ### Reading and writing configuration: `read-file`, `write-file`, `file-exists?`, `env` (`programs/config.lip`)
 
