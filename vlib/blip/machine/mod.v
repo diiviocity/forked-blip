@@ -854,7 +854,11 @@ fn inner_value(v blip.Value) blip.Value {
 	if v.tag != .pair {
 		return blip.nil_value()
 	}
-	return v.as_pair().cdr.as_pair().car
+	cdr := v.as_pair().cdr
+	if cdr.tag != .pair {
+		return blip.nil_value()
+	}
+	return cdr.as_pair().car
 }
 
 // result_combinator is map-result, try-result, lazy-map-result and lazy-unwrap.
@@ -1329,6 +1333,9 @@ fn (mut m Machine) apply_all(all_in []blip.Value) ! {
 			if args.len != 1 {
 				return error('a table used as a function takes 1 argument, got ${args.len}')
 			}
+			if args[0].tag !in [.string, .symbol, .keyword] {
+				return error('a table used as a function needs a string key, got ${printer.write(args[0])}')
+			}
 			m.val = m.lookup_key(args[0].as_string(), callee)!
 			m.ret()
 		}
@@ -1554,7 +1561,12 @@ fn format_args(args []blip.Value) string {
 	if args.len == 0 {
 		return ''
 	}
-	fm := args[0].as_string()
+	mut fm := ''
+	if args[0].tag in [.string, .symbol, .keyword, .primitive] {
+		fm = args[0].as_string()
+	} else {
+		fm = printer.write(args[0])
+	}
 	mut out := []u8{}
 	mut i := 0
 	mut next := 1
@@ -1641,7 +1653,11 @@ fn (mut m Machine) call_primitive(name string, args []blip.Value) ! {
 					return error('raise: an (err ...) value is not readable')
 				}
 				if parts.len > 1 {
-					msg = parts[1].as_string()
+					if parts[1].tag in [.string, .symbol, .keyword, .primitive] {
+						msg = parts[1].as_string()
+					} else {
+						msg = printer.write(parts[1])
+					}
 				} else {
 					msg = printer.write(args[0])
 				}
