@@ -37,6 +37,23 @@ lives in `docs/010-roadmap.md`; this file is the record.
   it now names both readings and exits 2. The `blip file.lip` shorthand
   still runs files without `blip run`.
 
+### The install pins the compiler, like CI does
+
+- `install.sh` and `install.ps1` (and the `site/` copies the website hands
+  out) built V from `git clone https://github.com/vlang/v` at whatever HEAD
+  was that morning. That is the same unpinned-Makefile hazard CI documented
+  and fixed in ci.yml, moved to the user's machine: between the pin
+  `0137eb5` and upstream master sit 1123 commits, and somewhere in there the
+  checker rejects source that the pinned compiler accepts -- so the install
+  works on Friday and fails on Monday, with nothing in either repo to blame.
+- Both scripts now build V and vc at exactly the pair ci.yml pins
+  (`V_COMMIT` / `VC_COMMIT`), record the pin in a marker file so a re-run
+  does not rebuild what is already right, fail fast with per-platform
+  guidance when no C compiler is installed, and locate `blip`-relative things
+  the same way CI does. The two pins now appear in four files; the gate
+  `tests/unit.v install_pins` reads ci.yml and all four scripts and fails on
+  any of them going missing or unpinned.
+
 ### The JavaScript backend, measured example by example (`blip emit-js`)
 
 - The bar is not "it emits" -- it is that the emitted JavaScript, run on
