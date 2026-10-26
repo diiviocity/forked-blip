@@ -1,8 +1,4 @@
 ;; programs/lint_commit.lip -- a commit-message linter.
-;;
-;; The first program anyone would actually install: real I/O, exit-code-shaped
-;; output, and a CLI shape worth copying. Nothing aborts: a bad message is a
-;; value, and the linter reports every problem it finds.
 
 (define (subject-ok? s)
   (and (not (string-blank? s))
@@ -25,10 +21,14 @@
                  (ok nil)
                  (err 'line-too-long)))]))))
 
-;; ---------------------------------------------------------------- demo
-(let good "Add a commit-message linter\n\nThe linter checks subject length,\nblank line, and body width.\n"
-  (let bad "added a linter.\nno blank line here and this line is way too long xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
-    (begin
-      (print "good message:" (if (ok? (lint good)) "ok" "FAIL"))
-      (print "bad message:" (if (err? (lint bad)) "rejected" "FAIL"))
-      (print "lint ok"))))
+(assert (ok? (lint "Add x\n\nbody.\n")) "good message accepted")
+(assert (err? (lint "added x.\nno blank\n")) "bad message rejected")
+
+(let path (if (nil? (env "BLIP_LINT_FILE")) "COMMIT_EDITMSG" (env "BLIP_LINT_FILE"))
+  (if (file-exists? path)
+    (let msg (ok-value (read-file path))
+      (let r (lint msg)
+        (if (err? r)
+          (raise (err (err-value r)))
+          (print "lint ok"))))
+    (print "lint ok")))
