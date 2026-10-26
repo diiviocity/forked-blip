@@ -76,6 +76,7 @@ fn main() {
 
 	s.check_program('brainfuck', 'programs/brainfuck.lip', 'brainfuck ok')
 	s.check_program('json', 'programs/json.lip', 'json ok')
+	s.check_program('config', 'programs/config.lip', 'config ok')
 
 	if s.fails > 0 {
 		println('${s.fails} FAILURE(S)')

@@ -6,6 +6,18 @@ lives in `docs/010-roadmap.md`; this file is the record.
 
 ## Unreleased
 
+### Reading and writing configuration: `read-file`, `write-file`, `file-exists?`, `env` (`programs/config.lip`)
+
+- blip had no way to touch the filesystem or the environment, so a "config
+  language" could not read a config file. Four hand-written primitives land
+  in `vlib/blip/prims/mod.v`: `read-file` and `write-file` answer Result
+  values (`(ok ...)` / `(err ...)`), so a missing file is a value that
+  composes with `use` rather than an abort; `file-exists?` is a boolean;
+  `env` returns the variable's value or nil when it is unset.
+- `programs/config.lip` exercises all four end to end: it writes a small
+  key: value file, reads it back, folds the lines into a table, reports each
+  value, and prints `config ok`. Registered in `tests/programs_run.v`.
+
 ### Hostile input is an error, not a process death (`tests/hostile.v`)
 
 - The promise "errors as values" had a hole every wrong call fell through:
