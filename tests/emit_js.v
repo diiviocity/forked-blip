@@ -200,6 +200,8 @@ fn main() {
 
 	s.check_example('03_match')
 
+	s.check_example('04_errors')
+
 	s.real_programs()
 
 	if s.fails > 0 {

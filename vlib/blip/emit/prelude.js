@@ -142,8 +142,17 @@ const blip = {
   // what `(get {:a 1} :missing)` returns, and what the third argument overrides.
   get: (t, k, ...rest) => {
     const m = unvec(t);
-    const key = m && m.blip_table ? m.blip_table[keyof(k)] : undefined;
-    if (key !== undefined && key !== null) return key;
+    if (m && m.blip_table) {
+      const key = m.blip_table[keyof(k)];
+      if (key !== undefined && key !== null) return key;
+      return rest.length > 0 ? rest[0] : null;
+    }
+    const items = seq_items(t);
+    if (items) {
+      const idx = (typeof k === "number") ? k : Number(k);
+      if (!Number.isNaN(idx) && idx >= 0 && idx < items.length) return items[idx];
+      return rest.length > 0 ? rest[0] : null;
+    }
     return rest.length > 0 ? rest[0] : null;
   },
   // Keys print SORTED, which is what blip's printer does: `{:name "ada" :b 2}`
@@ -275,6 +284,20 @@ const blip = {
   // special case in the printer, in `=` and in the pattern matcher, for no gain.
   ok: (...vals) => [blip.sym("ok")].concat(vals),
   err: (...vals) => [blip.sym("err")].concat(vals),
+  error: (...args) => blip.err(args.length === 0 ? "" : blip.format(String(args[0]), ...args.slice(1))),
+  raise: (...args) => {
+    let msg = "";
+    let subject = null;
+    if (args.length === 1 && Array.isArray(args[0]) && args[0].length >= 2
+        && args[0][0] && args[0][0].blip_sym === "err") {
+      subject = args[0];
+      msg = args[0][1];
+    } else {
+      msg = args.length === 0 ? "" : blip.format(String(args[0]), ...args.slice(1));
+      subject = blip.err(msg);
+    }
+    throw { blip_raise: { msg: msg, subject: subject } };
+  },
   ok_q: (r) => is_result(r, "ok"),
   err_q: (r) => is_result(r, "err"),
   // `ok-value` and `err-value` answer the value INSIDE, and refuse a result of the
