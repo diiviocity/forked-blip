@@ -6,6 +6,15 @@ lives in `docs/010-roadmap.md`; this file is the record.
 
 ## Unreleased
 
+### CI and the Docker images can actually build V (libgc)
+
+- The `Build V` step died on the runner with "Boehm GC library was not found",
+  and all three Docker images failed the same way: V's own binary links against
+  Boehm GC and the images only installed build-base/build-essential. Added
+  libgc-dev (gc-dev on Alpine, boehmgc on Nix) to ci.yml and all three
+  Dockerfiles, and a libgc preflight to install.sh. The test and docker-image
+  jobs can now get past "Build V".
+
 ### Reading and writing configuration: `read-file`, `write-file`, `file-exists?`, `env` (`programs/config.lip`)
 
 - blip had no way to touch the filesystem or the environment, so a "config

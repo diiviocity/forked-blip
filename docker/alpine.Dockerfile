@@ -17,7 +17,7 @@ FROM alpine:3.21
 
 # build-base is gcc, make and the rest of the C toolchain. git and curl are
 # what fetching the pinned compiler needs.
-RUN apk add --no-cache build-base git curl
+RUN apk add --no-cache build-base git curl gc-dev
 
 # The commit this project targets. Not the 0.5.2 release: vlang/v master at
 # this commit also reports itself as "V 0.5.2" and resolves modules
