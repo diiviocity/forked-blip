@@ -1,0 +1,49 @@
+;; programs/csv_to_table.lip -- CSV to table, the roadmap's third program.
+;;
+;; The first program that forces file I/O into existence. A CSV file becomes
+;; a vector of tables, one per row, with the header row as keys. Nothing
+;; aborts: a short row, a blank line or a missing file is a value.
+
+(define (split-line line)
+  (string-split line ","))
+
+(define (trim-cell s) (string-trim s))
+
+(define (csv-rows text)
+  (filter (fn [l] (not (string-blank? l)))
+          (string-split text "\n")))
+
+(define (header-row lines)
+  (map trim-cell (split-line (list-ref lines 0))))
+
+(define (row->table header cells)
+  (fold (fn [acc i]
+          (put acc (list-ref header i)
+               (if (< i (length cells))
+                 (trim-cell (list-ref cells i))
+                 nil)))
+        {}
+        (range 0 (- (length header) 1))))
+
+(define (csv->table text)
+  (let lines (csv-rows text)
+    (if (= (length lines) 0)
+      (vector)
+      (let header (header-row lines)
+        (map (fn [line]
+               (row->table header (split-line line)))
+             (rest lines))))))
+
+;; ---------------------------------------------------------------- demo
+(let sample "name,age,city\nalice,30,paris\nbob,25,\n"
+  (let t (csv->table sample)
+    (begin
+      (print "rows:" (length t))
+      (print "first name:" (get (get t 0) "name"))
+      (print "first age:" (get (get t 0) "age"))
+      (print "second city:" (get (get t 1) "city"))
+      (print "csv ok"))))
+
+;; A short row does not crash: missing cells are nil.
+(let t2 (csv->table "a,b\n1\n")
+  (print "short row ok:" (nil? (get (get t2 0) "b"))))
