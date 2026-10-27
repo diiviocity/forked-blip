@@ -488,7 +488,11 @@ fn (mut s Suite) lsp_api() {
 	// it runs these suites, then hands it an initialize and asks for an answer.
 	// A missing binary is a failure rather than a skip: every other suite here
 	// assumes the build has happened.
-	exe := if os.exists('blip.exe') { 'blip.exe' } else { 'blip' }
+	// ./blip, not bare `blip`: POSIX sh does not search the current
+	// directory, so the runner died with `blip: not found` and an empty
+	// stdout record. On Windows cmd searches cwd, which is why this ever
+	// looked green locally.
+	exe := if os.exists('blip.exe') { 'blip.exe' } else { './blip' }
 	init := '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
 	exitn := '{"jsonrpc":"2.0","method":"exit"}'
 	framed := 'Content-Length: ${init.len}\r\n\r\n${init}Content-Length: ${exitn.len}\r\n\r\n${exitn}'

@@ -15,7 +15,104 @@ lives in `docs/010-roadmap.md`; this file is the record.
   Both the `test` job and the `docker-images` job now get past the "Build V"
   step.
 
-### Reading and writing configuration: `read-file`, `write-file`, `file-exists?`, `env` (`programs/config.lip`)
+### CI: the real Build V failure was an unquoted VFLAGS — `option '-d' requires a value`
+
+- Three green-looking-error CI runs (`#15`, `#16`, and the pre-#17 logs) all
+  said only `make: *** [Makefile:33: v] Error 1`, since swallowed. The
+  `build.log` diagnostic from the previous entry captured the last line
+  before the death: `option '-d' requires a value`. `make
+  -f Makefile v VFLAGS=-d use_bundled_libgc` parses as *`VFLAGS` = `-d`,
+  plus a second goal named `use_bundled_libgc`* — so the `v` target ran with
+  a valueless `-d` and V refused it. The Dockerfiles have always quoted the
+  assignment (`VFLAGS="-d use_bundled_libgc"`) and pass this exact line.
+- Fixed by quoting in `ci.yml`. Also fixed there (pre-existing, found while
+  reading the step closely): the `mkdir -p`/`libgc.a` copy used a
+  `v/thirdparty/...` prefix *after* `cd v`, landing the copy in the
+  nonexistent `v/v/thirdparty/...`; all three Dockerfiles had the same
+  wrong prefix. Now relative to the checkout, with a comment on why.
+- CI now builds and runs three more gates: `multi_use`, `value_to_datum`,
+  `macros_gate` — previously run by hand only, which made the docs' suite
+  lists lie about what was actually enforced.
+- Known-open, verified from the same run's logs: `docker-images` fails only
+  on the Nix image, at `nix-env -iA nixpkgs.gcc ...` (`error: Unable to
+  build profile. There is a conflict...`); the Alpine and Debian images get
+  deep into the V build. Not fixed in this change — needs its own
+  investigation of which packages collide on the current `nixos/nix:latest`.
+
+### Generated prims were read from a different V build (`gen_math.v` header hash)
+
+- `tools/genprims.vsh --check` failed: the committed
+  `vlib/blip/prims/gen_math.v` declared `generated ... at V 0.5.2 abcebfc`,
+  while the pinned compiler's vlib math module hashes `dd6834e`. Both builds
+  self-report `V 0.5.2` — the exact trap §7.1a documents about pinning
+  commits instead of version strings. The only diff the regeneration
+  produced is the header hash, no semantics; regenerated and committed.
+- What the runner's check then exposed: the shelling-out habit went deeper
+  than the stamp. Both `v version` (the stamp) and `v ast -p` (the
+  signatures) called bare `v` — whichever build was on PATH. Locally that
+  was a release install of another commit, so "regenerated at the pin"
+  above was true of the version string and false about the compiler run.
+  Fixed on both axes: the tool now uses `@VEXE` — the compiler actually
+  running the script — for both calls, and `--check` strips the header
+  stamp before comparing, so a check compares generated CONTENT, not the
+  birthstamp of whichever build's PATH won.
+- Both directions proven against the regenerated file: corrupting only the
+  header stamp passes; corrupting a body line (`math.floor(a0) + 1.0`)
+  fails with `stale`. An earlier own-goal caught on the way: an `${...}`
+  interpolation with a nested `'`-quoted literal turned `strip_stamp` into
+  a same-string tautology on both sides and the check accepted real
+  corruption; rewritten as plain concatenation and the controls re-run.
+
+### Three suites were green on Windows and blind on POSIX (runner-exposed)
+
+- The runner's "Run the suites" step reached suites CI had never actually
+  executed before the Build V fix, and three dependencies on the operator's
+  machine fell over:
+  - `emit_js` and the `unit` serve check shelled out to bare `blip`. cmd
+    searches the current directory, so Windows runs found `blip.exe`;
+    POSIX `sh` does not, so the runner died with `sh: 1: blip: not found`,
+    exit 127. In `emit_js` this was worse than fast: for the example
+    comparisons BOTH engines then failed with the identical error string
+    and compared EQUAL — a suite that passes by comparing two identical
+    failures. Both now resolve `./blip` (or `blip.exe`) the way CI builds
+    it, next to the test binaries.
+  - `programs/config.lip` built its demo path from `(env "TEMP")`, a
+    Windows convention. Unset on the runner, `string-append` got `nil`.
+    Fixed with `nil?` tests over TEMP/TMP falling back to `/tmp`. A first
+    attempt used the Ruby idiom `(or (env "TEMP") fallback)` and FAILED
+    the same way on a reproduced runner: blip's truthiness is R5RS-strict —
+    only `#f` is false — so nil is TRUE and `or` hands it back instead of
+    falling through. `or` itself is correct (proven with `#f` and a
+    side-effect probe: `(or #f 2 3)` is `2`, the `3` never evaluates); the
+    idiom was wrong, and it is now gated: five truthiness checks in
+    `tests/binding_forms.v`, including `(or nil 2)` ➜ `nil`.
+- Gates: `tests/emit_js.v` (20/20), `tests/unit.v` (174 checks incl.
+  `serve answered on stdout => 124 bytes`), `tests/programs_run.v`
+  (`config ok` with TEMP set AND unset),
+  `tests/binding_forms.v` (94 checks, five of them new).
+
+### Macros: `value → AST` for pure shapes; the embedded machine built and gated
+
+- `docs/macros-design.md` called this work "deferred, no code changes"; that
+  stopped being true. `vlib/blip/value_to_datum.v` now converts the eleven
+  pure shapes (nil, booleans, integer, float, string, symbol, keyword,
+  empty list, pairs and chains, vectors) back into `NodeId`s and refuses the
+  complex ones (table, closure, primitive...) with a returned error, in line
+  with the errors-as-values rule rather than a panic.
+- Option 1 from the memo — embedded machine at emit time — exists as
+  `vlib/blip/emit/macro_embed.v` (`expand_macro_at_embed`): a fresh
+  standalone machine, source in, expanded `Value` converted back to AST.
+- Neither is wired into `emit/mod.v`'s dispatch, so `defmacro` / `macex` /
+  `macex1` REMAIN in `unsupported_forms` and `05_pipelines` remains refused
+  by name (emit-js: 5 run, 1 refused — unchanged). An earlier edit removed
+  them from the list during stub work; that edit was reverted before it
+  could merge, because with no emit-time consumer a `defmacro` name falls
+  through to the ordinary call path and emits `defmacro(...)` as JS —
+  accepted, no output, the silent-green failure the backend gate exists to
+  catch.
+- Gates: `tests/macros_gate.v` (which started life as a stub that printed
+  `FAIL` unconditionally, per the no-code-without-a-failing-gate rule, and
+  now exercises 13 real checks) and `tests/value_to_datum.v`.
 
 ### Reading and writing configuration: `read-file`, `write-file`, `file-exists?`, `env` (`programs/config.lip`)
 

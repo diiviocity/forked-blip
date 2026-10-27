@@ -31,7 +31,18 @@
 
 ;; ---------------------------------------------------------------- demo
 ;; Build a config file on disk, then read it back.
-(let tmp (string-append (env "TEMP") "/blip-config-demo.txt")
+;;
+;; An unset variable is nil, and truthiness here is R5RS-strict: only #f is
+;; false, so nil is TRUE and `(or (env "TEMP") fallback)` hands nil back
+;; instead of falling through -- exactly the Ruby-brain trap the binding
+;; suite now gates on. TEMP and TMP are Windows conventions, /tmp the POSIX
+;; default, so unset-ness has to be tested with `nil?`.
+(define (tmp-dir)
+  (if (nil? (env "TEMP"))
+    (if (nil? (env "TMP")) "/tmp" (env "TMP"))
+    (env "TEMP")))
+
+(let tmp (string-append (tmp-dir) "/blip-config-demo.txt")
   (use (write-file tmp "host: localhost\nport: 8080\n\ndebug: true\n")
     (let cfg (read-config tmp)
       (begin

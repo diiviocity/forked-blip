@@ -49,6 +49,9 @@ changes are recorded in `CHANGELOG.md`.
 | `tests/examples_run.v` | all six examples run to their markers |
 | `tests/programs_run.v` | brainfuck and json run to their markers |
 | `tests/genprims.v` | every generated prim's value, arity, and type errors |
+| `tests/multi_use.v` | `use` loads into the one running machine: definitions cross the boundary |
+| `tests/value_to_datum.v` | `value_to_datum`: values convert back to AST nodes (the macro path's inverse direction) |
+| `tests/macros_gate.v` | the embedded-machine macro path: pure shapes convert end-to-end, complex shapes refuse by error |
 
 `let*`, rest parameters and callable keywords now work, and `tests/binding_forms.v`
 covers them. The three were long misdiagnosed as one problem — "`[...]` is a vector
@@ -185,13 +188,14 @@ own modules where the release build resolves it against V's standard library.
 
 | Branch | Role |
 |---|---|
-| `master` | stable. Releases are cut from here by pushing a `v*` tag. Protected. |
+| `main` | stable. Releases are cut from here by pushing a `v*` tag. Protected. |
 | `dev` | integration. Pull requests land here. |
 | `<topic>` | a branch off `dev` |
 
-`master` moves only when a milestone's gate is met, so it stays something a
-person can depend on. `release.yml` verifies on the tag — the same nine suites a
-contributor runs locally — and builds the binaries and the generated site. A
+`main` moves only when a milestone's gate is met, so it stays something a
+person can depend on. `release.yml` verifies on the tag — the same seventeen
+suites a contributor runs locally — and builds the binaries and the
+generated site. A
 manual run of that workflow builds and verifies but does not publish, so a dry
 run cannot create a release by accident.
 

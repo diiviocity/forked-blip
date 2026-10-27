@@ -122,9 +122,16 @@ jobs:
           # installs to /usr/lib/x86_64-linux-gnu/libgc.a; copy it into place.
           # NOTE: we already did `cd v` above, so these paths are relative to
           # the V checkout (not `v/...`).
+          #
+          # VFLAGS MUST be quoted. Unquoted (`VFLAGS=-d use_bundled_libgc`), make
+          # reads the assignment as `VFLAGS=-d` and treats `use_bundled_libgc`
+          # as a second goal; V then dies with `option '-d' requires a value`
+          # and make reports Makefile:33. Three CI runs lost to this before
+          # build.log captured the real error — the Dockerfiles quote it and
+          # pass the same line.
           mkdir -p thirdparty/tcc/lib
           cp /usr/lib/x86_64-linux-gnu/libgc.a thirdparty/tcc/lib/libgc.a 2>/dev/null || cp /usr/lib/libgc.a thirdparty/tcc/lib/libgc.a 2>/dev/null || true
-          make -f Makefile v VFLAGS=-d use_bundled_libgc 2>&1 | tee build.log
+          make -f Makefile v VFLAGS="-d use_bundled_libgc" 2>&1 | tee build.log
           if [ ! -x ./v ]; then
             echo "::error::Build V failed — see build.log"
             cat build.log || true
@@ -169,6 +176,9 @@ jobs:
           v -cc gcc -o emit_js tests/emit_js.v
           v -cc gcc -o lsp tests/lsp.v
           v -cc gcc -o hostile tests/hostile.v
+          v -cc gcc -o multi_use tests/multi_use.v
+          v -cc gcc -o value_to_datum tests/value_to_datum.v
+          v -cc gcc -o macros_gate tests/macros_gate.v
 
       # These runners print results and do not set an exit code yet, so the
       # output is checked rather than the status. That is listed as a known gap
@@ -190,6 +200,9 @@ jobs:
           ./emit_js       | tee -a out.txt
           ./lsp            | tee -a out.txt
           ./hostile        | tee -a out.txt
+          ./multi_use      | tee -a out.txt
+          ./value_to_datum | tee -a out.txt
+          ./macros_gate    | tee -a out.txt
           if grep -qE '^FAIL|panic' out.txt; then
             echo "::error::a check failed or the machine panicked"
             exit 1

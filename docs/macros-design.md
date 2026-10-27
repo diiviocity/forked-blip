@@ -1,6 +1,9 @@
-# Macros at emit time — design memo (deferred)
+# Macros at emit time — design memo
 
-Status: deferred by design. No code changes; research only.
+Status: partially implemented (updated 2026-10-27). The pure-data half of
+Option 2 and the embedded machine of Option 1 are built and gated; neither is
+wired into the emit dispatch, so `defmacro` / `macex` / `macex1` remain
+refused by name and the `05_pipelines` example stays out of the emitted set.
 
 ## What already exists (machine side)
 
@@ -65,8 +68,31 @@ This is acceptable for a configuration language — macros are nice-to-have, not
 
 ## Recommended next step (if continuing)
 
-1. Write `value_to_datum` (Option 2) for pure data shapes (list, vector, symbol, string, keyword, int, float, bool, nil).
-2. If it passes unit tests, try Option 1 (embedded machine + conversion) for full macro expansion.
-3. Only add `defmacro` removal from `unsupported_forms` once a gate/test exists — per repo convention, no code lands without a failing gate.
+1. ~~Write `value_to_datum` (Option 2) for pure data shapes~~ **Done
+   (2026-10-27).** `vlib/blip/value_to_datum.v` converts the eleven pure
+   shapes (nil, boolean, integer, float, string, symbol, keyword, emptylist,
+   pair, vector, and pair chains) and deliberately refuses the complex ones
+   (table, closure, primitive, ...) with an error, not a panic. Gates:
+   `tests/macros_gate.v` (13 checks, all green) and `tests/value_to_datum.v`.
+2. ~~If it passes unit tests, try Option 1 (embedded machine + conversion) for
+   full macro expansion~~ **Built and gated, not wired (2026-10-27).**
+   `vlib/blip/emit/macro_embed.v` exposes `expand_macro_at_embed`, which runs
+   a fresh `machine.new_standalone` over the source, evaluates it, and
+   round-trips the expanded `Value` through `value_to_datum`. Exercised
+   end-to-end by `tests/macros_gate.v`.
+3. **Remaining**: the emitter (`emit/mod.v`) cannot render an expanded
+   `NodeId` back to JavaScript yet, so `defmacro` / `macex` / `macex1` stay
+   in `unsupported_forms`. Removing them today would make a `defmacro` name
+   fall through to the ordinary call path and emit `defmacro(...)` as a JS
+   call — accepted, no output, the exact silent-green failure this repo
+   refuses to ship. Wire them only once `expand_macro_at_embed` is called
+   from the statement dispatch AND the emitted result is asserted on by a
+   gate (the `tests/emit_js.v` real-programs check is the shape to extend
+   with an `05_pipelines` case).
+
+Two failure modes this gate protects against, both real: emitting a macro as
+a plain JS identifier (acceptance with no output), and `value_to_datum`
+panicking on a closure it cannot express (the machine's recoverable-panic net
+turns it into an error, which is what "complex refuses" asserts).
 
 Until then: `05_pipelines` stays refused, and emit-js remains fully working for all other examples.

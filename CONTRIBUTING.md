@@ -60,14 +60,17 @@ v -cc gcc -o reader_probe.exe reader_probe.v
 .\reader_probe.exe examples\*.lip
 ```
 
-All eleven suites must print no `FAIL` line and the reader probe must report zero
+All seventeen suites must print no `FAIL` line and the reader probe must report zero
 diagnostics. The runners do not set a non-zero exit code yet, which is why CI
 greps for `FAIL`.
 
-The eleven are: `tail_calls`, `non_tail`, `loop_forms`, `binding_forms`,
-`embedding`, `repl_golden`, `examples_run`, `programs_run`, `genprims`, `unit`,
-`emit_js`, `lsp`. (`CONTRIBUTING.md` said nine for a while after two were
-already in CI, which is the kind of drift this line exists to stop.)
+The seventeen are: `tail_calls`, `non_tail`, `loop_forms`, `binding_forms`,
+`embedding`, `repl_golden`, `examples_run`, `programs_run`, `genprims`,
+`unit`, `emit_js`, `lsp`, `hostile`, `multi_use`, `value_to_datum`,
+`macros_gate`. (`CONTRIBUTING.md` said nine, then eleven, then twelve for
+a while after the rest were already in CI, which is the kind of drift this
+line exists to stop. The live list is the one in `.github/workflows/ci.yml`
+— if the two disagree, `ci.yml` wins.)
 
 ### The C-stage flake: `src.c:...: unterminated #ifndef`
 
