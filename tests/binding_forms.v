@@ -144,7 +144,7 @@ fn main() {
 		'(letrec ([e (lambda (n) (if (= n 0) #t (o (- n 1))))]
 		          [o (lambda (n) (if (= n 0) #f (e (- n 1))))])
 		   (e 20))', '#t')
-// A letrec value may refer to a LATER name -- that is why letrec is not
+	// A letrec value may refer to a LATER name -- that is why letrec is not
 	// defined in terms of let -- but the initialisations run left to right, so a
 	// forward reference sees the placeholder. Scheme leaves this order
 	// unspecified; stating it is better than leaving a reader to assume.
@@ -257,6 +257,17 @@ fn main() {
 	s.check_err('division by zero', '(/ 1 0)', 'division by zero')
 	s.check_err('compare incompatible', '(< 1 "a")', 'cannot compare')
 	s.check_err('add a string', '(+ 1 "a")', 'expects an integer')
+
+	// ---- truthiness is R5RS-strict: only #f is false ---------------------
+	// The cost of getting this backwards was real: `config.lip` used the
+	// Ruby/JS idiom `(or (env "TEMP") fallback)`, and on the runner env
+	// returned nil — which is TRUE here, so or handed nil back and
+	// string-append died. An unset variable is tested with `nil?`, not `or`.
+	s.check('nil is true', '(if nil "yes" "no")', '"yes"')
+	s.check('#f is the only false', '(if #f "yes" "no")', '"no"')
+	s.check('or falls through #f and stops lazily', '(or #f 2 3)', '2')
+	s.check('or with truthy nil returns nil', '(or nil 2)', 'nil')
+	s.check('and returns the last value', '(and 1 2)', '2')
 
 	if s.fails > 0 {
 		println('${s.fails} FAILURE(S)')

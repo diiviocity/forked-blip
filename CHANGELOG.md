@@ -78,12 +78,18 @@ lives in `docs/010-roadmap.md`; this file is the record.
     it, next to the test binaries.
   - `programs/config.lip` built its demo path from `(env "TEMP")`, a
     Windows convention. Unset on the runner, `string-append` got `nil`.
-    The program now falls through `(or (env "TEMP") (or (env "TMP")
-    "/tmp"))` — the point of a config demo is to run in real conditions,
-    and `or`'s nil fallthrough is exactly the form for it.
+    Fixed with `nil?` tests over TEMP/TMP falling back to `/tmp`. A first
+    attempt used the Ruby idiom `(or (env "TEMP") fallback)` and FAILED
+    the same way on a reproduced runner: blip's truthiness is R5RS-strict —
+    only `#f` is false — so nil is TRUE and `or` hands it back instead of
+    falling through. `or` itself is correct (proven with `#f` and a
+    side-effect probe: `(or #f 2 3)` is `2`, the `3` never evaluates); the
+    idiom was wrong, and it is now gated: five truthiness checks in
+    `tests/binding_forms.v`, including `(or nil 2)` ➜ `nil`.
 - Gates: `tests/emit_js.v` (20/20), `tests/unit.v` (174 checks incl.
   `serve answered on stdout => 124 bytes`), `tests/programs_run.v`
-  (`config ok`). Locally identical output to before, on both mechanisms.
+  (`config ok` with TEMP set AND unset),
+  `tests/binding_forms.v` (94 checks, five of them new).
 
 ### Macros: `value → AST` for pure shapes; the embedded machine built and gated
 
