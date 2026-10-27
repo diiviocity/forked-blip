@@ -63,6 +63,28 @@ lives in `docs/010-roadmap.md`; this file is the record.
   a same-string tautology on both sides and the check accepted real
   corruption; rewritten as plain concatenation and the controls re-run.
 
+### Three suites were green on Windows and blind on POSIX (runner-exposed)
+
+- The runner's "Run the suites" step reached suites CI had never actually
+  executed before the Build V fix, and three dependencies on the operator's
+  machine fell over:
+  - `emit_js` and the `unit` serve check shelled out to bare `blip`. cmd
+    searches the current directory, so Windows runs found `blip.exe`;
+    POSIX `sh` does not, so the runner died with `sh: 1: blip: not found`,
+    exit 127. In `emit_js` this was worse than fast: for the example
+    comparisons BOTH engines then failed with the identical error string
+    and compared EQUAL — a suite that passes by comparing two identical
+    failures. Both now resolve `./blip` (or `blip.exe`) the way CI builds
+    it, next to the test binaries.
+  - `programs/config.lip` built its demo path from `(env "TEMP")`, a
+    Windows convention. Unset on the runner, `string-append` got `nil`.
+    The program now falls through `(or (env "TEMP") (or (env "TMP")
+    "/tmp"))` — the point of a config demo is to run in real conditions,
+    and `or`'s nil fallthrough is exactly the form for it.
+- Gates: `tests/emit_js.v` (20/20), `tests/unit.v` (174 checks incl.
+  `serve answered on stdout => 124 bytes`), `tests/programs_run.v`
+  (`config ok`). Locally identical output to before, on both mechanisms.
+
 ### Macros: `value → AST` for pure shapes; the embedded machine built and gated
 
 - `docs/macros-design.md` called this work "deferred, no code changes"; that

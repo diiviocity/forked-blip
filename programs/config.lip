@@ -30,8 +30,10 @@
               lines)))))
 
 ;; ---------------------------------------------------------------- demo
-;; Build a config file on disk, then read it back.
-(let tmp (string-append (env "TEMP") "/blip-config-demo.txt")
+;; Build a config file on disk, then read it back. TEMP is a Windows
+;; convention and missing on a POSIX box; `or` falls through the nil all
+;; the way to /tmp, so the same program runs on both.
+(let tmp (string-append (or (env "TEMP") (or (env "TMP") "/tmp")) "/blip-config-demo.txt")
   (use (write-file tmp "host: localhost\nport: 8080\n\ndebug: true\n")
     (let cfg (read-config tmp)
       (begin

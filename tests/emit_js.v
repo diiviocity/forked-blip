@@ -75,6 +75,16 @@ fn node_output(js string) string {
 	return got.trim_right('\n')
 }
 
+// blip_cli is the interpreter the runner built next to this test. Bare
+// `blip` resolves against PATH, and POSIX sh does not check the current
+// directory, so a green Windows run (cmd searches cwd) became
+// `sh: 1: blip: not found`, exit 127, on the runner — and for the example
+// checks both "engines" then failed identically, which compared EQUAL.
+// Path it explicitly; never compare two identical failure strings.
+fn blip_cli() string {
+	return if os.exists('blip.exe') { '.\\blip.exe' } else { './blip' }
+}
+
 // blip_file_output runs a FILE through the blip CLI, which loads lib/std.lip.
 //
 // The in-process `blip_output` deliberately does NOT load the standard library,
@@ -86,7 +96,7 @@ fn blip_file_output(path string) string {
 	os.mkdir_all('tmp') or {}
 	out_path := os.join_path(os.getwd(), 'tmp', 'emit_blip.out')
 	os.rm(out_path) or {}
-	shelled := os.system('blip run "${path}" > "${out_path}" 2>&1')
+	shelled := os.system('"${blip_cli()}" run "${path}" > "${out_path}" 2>&1')
 	got := os.read_file(out_path) or { '' }
 	os.rm(out_path) or {}
 	if shelled != 0 {
@@ -224,8 +234,7 @@ fn main() {
 // produce output. Either outcome is a real result. The one that is not allowed
 // is acceptance with no output, which is what this used to do.
 fn (mut s Suite) real_programs() {
-	examples := ['01_basics', '02_data', '03_match', '04_errors', '05_pipelines',
-		'06_modules']
+	examples := ['01_basics', '02_data', '03_match', '04_errors', '05_pipelines', '06_modules']
 	mut silent := []string{}
 	mut refused := []string{}
 	mut running := []string{}
