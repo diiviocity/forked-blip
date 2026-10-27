@@ -15,7 +15,62 @@ lives in `docs/010-roadmap.md`; this file is the record.
   Both the `test` job and the `docker-images` job now get past the "Build V"
   step.
 
-### Reading and writing configuration: `read-file`, `write-file`, `file-exists?`, `env` (`programs/config.lip`)
+### CI: the real Build V failure was an unquoted VFLAGS — `option '-d' requires a value`
+
+- Three green-looking-error CI runs (`#15`, `#16`, and the pre-#17 logs) all
+  said only `make: *** [Makefile:33: v] Error 1`, since swallowed. The
+  `build.log` diagnostic from the previous entry captured the last line
+  before the death: `option '-d' requires a value`. `make
+  -f Makefile v VFLAGS=-d use_bundled_libgc` parses as *`VFLAGS` = `-d`,
+  plus a second goal named `use_bundled_libgc`* — so the `v` target ran with
+  a valueless `-d` and V refused it. The Dockerfiles have always quoted the
+  assignment (`VFLAGS="-d use_bundled_libgc"`) and pass this exact line.
+- Fixed by quoting in `ci.yml`. Also fixed there (pre-existing, found while
+  reading the step closely): the `mkdir -p`/`libgc.a` copy used a
+  `v/thirdparty/...` prefix *after* `cd v`, landing the copy in the
+  nonexistent `v/v/thirdparty/...`; all three Dockerfiles had the same
+  wrong prefix. Now relative to the checkout, with a comment on why.
+- CI now builds and runs three more gates: `multi_use`, `value_to_datum`,
+  `macros_gate` — previously run by hand only, which made the docs' suite
+  lists lie about what was actually enforced.
+- Known-open, verified from the same run's logs: `docker-images` fails only
+  on the Nix image, at `nix-env -iA nixpkgs.gcc ...` (`error: Unable to
+  build profile. There is a conflict...`); the Alpine and Debian images get
+  deep into the V build. Not fixed in this change — needs its own
+  investigation of which packages collide on the current `nixos/nix:latest`.
+
+### Generated prims were read from a different V build (`gen_math.v` header hash)
+
+- `tools/genprims.vsh --check` failed: the committed
+  `vlib/blip/prims/gen_math.v` declared `generated ... at V 0.5.2 abcebfc`,
+  while the pinned compiler's vlib math module hashes `dd6834e`. Both builds
+  self-report `V 0.5.2` — the exact trap §7.1a documents about pinning
+  commits instead of version strings. The only diff the regeneration
+  produced is the header hash, no semantics; regenerated at the pin and
+  committed.
+
+### Macros: `value → AST` for pure shapes; the embedded machine built and gated
+
+- `docs/macros-design.md` called this work "deferred, no code changes"; that
+  stopped being true. `vlib/blip/value_to_datum.v` now converts the eleven
+  pure shapes (nil, booleans, integer, float, string, symbol, keyword,
+  empty list, pairs and chains, vectors) back into `NodeId`s and refuses the
+  complex ones (table, closure, primitive...) with a returned error, in line
+  with the errors-as-values rule rather than a panic.
+- Option 1 from the memo — embedded machine at emit time — exists as
+  `vlib/blip/emit/macro_embed.v` (`expand_macro_at_embed`): a fresh
+  standalone machine, source in, expanded `Value` converted back to AST.
+- Neither is wired into `emit/mod.v`'s dispatch, so `defmacro` / `macex` /
+  `macex1` REMAIN in `unsupported_forms` and `05_pipelines` remains refused
+  by name (emit-js: 5 run, 1 refused — unchanged). An earlier edit removed
+  them from the list during stub work; that edit was reverted before it
+  could merge, because with no emit-time consumer a `defmacro` name falls
+  through to the ordinary call path and emits `defmacro(...)` as JS —
+  accepted, no output, the silent-green failure the backend gate exists to
+  catch.
+- Gates: `tests/macros_gate.v` (which started life as a stub that printed
+  `FAIL` unconditionally, per the no-code-without-a-failing-gate rule, and
+  now exercises 13 real checks) and `tests/value_to_datum.v`.
 
 ### Reading and writing configuration: `read-file`, `write-file`, `file-exists?`, `env` (`programs/config.lip`)
 

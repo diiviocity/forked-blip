@@ -29,10 +29,17 @@ in `CONTRIBUTING.md`, the plan in `docs/010-roadmap.md`, history in
   `V_MACOS_V3_NO_FALLBACK=1` (the V3 fallback resolves modules
   differently; see roadmap §7.1a).
 - `v -cc gcc -o blip.exe blip.v`, then `v run tests/<suite>.v`.
-  Suites: tail_calls, non_tail, loop_forms, binding_forms, embedding,
-  repl_golden, examples_run, programs_run, genprims. Zero `FAIL` lines.
+  Suites (the set CI builds and runs): tail_calls, non_tail, loop_forms,
+  binding_forms, embedding, repl_golden, examples_run, programs_run,
+  genprims, unit, api_coverage, emit_js, lsp, hostile, multi_use,
+  value_to_datum, macros_gate. Zero `FAIL` lines.
 - `v -cc gcc run tools/genprims.vsh --check` must pass (generated prims
-  match the pinned compiler); without `--check` it regenerates.
+  match the pinned compiler); without `--check` it regenerates. DATED
+  2026-10-27: it passes again after gen_math.v was regenerated at the pin —
+  the committed file carried a header hash from a different V build
+  (abcebfc, not dd6834e). Both builds self-report "V 0.5.2"; see §7.1a. If
+  `--check` goes stale after a compiler sync, regenerate and review the
+  diff before committing.
 
 ## Gotchas that cost sessions
 
@@ -46,3 +53,14 @@ in `CONTRIBUTING.md`, the plan in `docs/010-roadmap.md`, history in
 - Shell is Windows PowerShell 5.1: edit with the edit/write tools, use
   `.vsh` scripts (not shell one-liners) for anything reusable, and quote
   accordingly. `v test` finds nothing; `v run` is the runner.
+- `make ... VFLAGS=-d use_bundled_libgc` is BROKEN, and the Dockerfiles
+  show the fix: quote it (`VFLAGS="-d use_bundled_libgc"`). Unquoted make
+  reads `VFLAGS=-d` and treats `use_bundled_libgc` as a second goal; V
+  then dies with `option '-d' requires a value` and make prints
+  `Makefile:33: v Error 1`. Three CI runs were lost to this before the
+  PR #17 `build.log` diagnostic captured the real error text.
+- Never run `tests/*.v` files through `.\blip.exe run` — they are V
+  programs for `v run`, and the blip reader chokes on `module main`.
+  Gates report with `ok  `/`PASS`/`macros_gate:` lines; only a literal
+  `FAIL` line (CI greps `^FAIL` from the joined output) means a check
+  failed.
