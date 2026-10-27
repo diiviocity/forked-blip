@@ -46,8 +46,22 @@ lives in `docs/010-roadmap.md`; this file is the record.
   while the pinned compiler's vlib math module hashes `dd6834e`. Both builds
   self-report `V 0.5.2` — the exact trap §7.1a documents about pinning
   commits instead of version strings. The only diff the regeneration
-  produced is the header hash, no semantics; regenerated at the pin and
-  committed.
+  produced is the header hash, no semantics; regenerated and committed.
+- What the runner's check then exposed: the shelling-out habit went deeper
+  than the stamp. Both `v version` (the stamp) and `v ast -p` (the
+  signatures) called bare `v` — whichever build was on PATH. Locally that
+  was a release install of another commit, so "regenerated at the pin"
+  above was true of the version string and false about the compiler run.
+  Fixed on both axes: the tool now uses `@VEXE` — the compiler actually
+  running the script — for both calls, and `--check` strips the header
+  stamp before comparing, so a check compares generated CONTENT, not the
+  birthstamp of whichever build's PATH won.
+- Both directions proven against the regenerated file: corrupting only the
+  header stamp passes; corrupting a body line (`math.floor(a0) + 1.0`)
+  fails with `stale`. An earlier own-goal caught on the way: an `${...}`
+  interpolation with a nested `'`-quoted literal turned `strip_stamp` into
+  a same-string tautology on both sides and the check accepted real
+  corruption; rewritten as plain concatenation and the controls re-run.
 
 ### Macros: `value → AST` for pure shapes; the embedded machine built and gated
 

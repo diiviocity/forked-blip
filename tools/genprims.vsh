@@ -47,8 +47,8 @@ const allowlist = [
 	},
 ]
 
-const int_types = ['i8', 'i16', 'int', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'byte',
-	'isize', 'usize']
+const int_types = ['i8', 'i16', 'int', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'byte', 'isize',
+	'usize']
 
 // ------------------------------------------------------------------ ast
 
@@ -96,8 +96,8 @@ fn collect_sigs(doc json2.Any) []Sig {
 				continue
 			}
 			mut s := Sig{
-				name: field_str(node, 'value')
-				ret:  field_str(node, 'type')
+				name:   field_str(node, 'value')
+				ret:    field_str(node, 'type')
 				params: []
 			}
 			for c in child_list(node) {
@@ -217,7 +217,7 @@ fn emit_fn(module string, s Sig) Emitted {
 	mut sb := strings.new_builder(512)
 	sb.write_string('// ${pname} wraps ${module}.${s.name}(${param_text(s)}) ${s.ret}.\n')
 	sb.write_string('fn prim_gen_${module}_${s.name}(args []blip.Value) !blip.Value {\n')
-	sb.write_string("\tif args.len != ${s.params.len} {\n")
+	sb.write_string('\tif args.len != ${s.params.len} {\n')
 	sb.write_string("\t\treturn error('${pname} expects ${s.params.len} argument(s), got \${args.len}')\n")
 	sb.write_string('\t}\n')
 	sb.write_string(decls)
@@ -268,11 +268,34 @@ fn vlib_dir() string {
 }
 
 fn v_version() string {
-	r := os.execute('v version')
+	// @VEXE, not bare `v`: a `v run` script that shells out to `v version`
+	// otherwise stamps itself with whichever V is on PATH, which is a
+	// different build from the one running the script (local release install
+	// dd6834e vs the pinned v-pin 0137eb5 was a real mismatch).
+	r := os.execute('"${@VEXE}" version')
 	if r.exit_code != 0 {
 		return 'unknown'
 	}
 	return r.output.trim_space()
+}
+
+// strip_stamp removes the header's `at V <version>` build stamp, so --check
+// compares generated CONTENT. The stamp records which build produced the
+// file, but local and CI regenerate from the same pinned sources against
+// the same vlib, so a differing stamp alone is not staleness.
+fn strip_stamp(t string) string {
+	nl := t.index('\n') or { return t }
+	head := t[..nl]
+	if !head.contains(' at V ') {
+		return t
+	}
+	// Plain concatenation only: a `${...}` interpolation with a nested
+	// single-quoted literal once turned this check into a tautology; the
+	// same string came back for both sides, and content corruption was
+	// accepted silently. Keep this line dumb. The controls, to rerun after
+	// any edit here: corrupt ONLY the stamp → --check passes; corrupt a
+	// body line → --check fails.
+	return head.all_before(' at V ') + '.' + t[nl..]
 }
 
 // existing_prims text-scans the hand-written table for registered names, so
@@ -327,7 +350,7 @@ fn main() {
 		mut dupes := []string{}
 		for file in target.files {
 			path := os.join_path(vlib, target.module) + os.path_separator + file
-			r := os.execute('v ast -p ${path}')
+			r := os.execute('"${@VEXE}" ast -p ${path}')
 			if r.exit_code != 0 {
 				eprintln('genprims: v ast failed on ${target.module}/${file}:')
 				eprintln(r.output)
@@ -491,7 +514,7 @@ fn main() {
 			}
 			// Line endings are not content: a CRLF checkout on Windows and
 			// an LF one on Linux must both pass against the same output.
-			if cur.replace('\r\n', '\n') != body {
+			if strip_stamp(cur.replace('\r\n', '\n')) != strip_stamp(body) {
 				eprintln('genprims --check: stale ${path}; rerun without --check and review the diff')
 				dirty = true
 			}

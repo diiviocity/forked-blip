@@ -35,11 +35,14 @@ in `CONTRIBUTING.md`, the plan in `docs/010-roadmap.md`, history in
   value_to_datum, macros_gate. Zero `FAIL` lines.
 - `v -cc gcc run tools/genprims.vsh --check` must pass (generated prims
   match the pinned compiler); without `--check` it regenerates. DATED
-  2026-10-27: it passes again after gen_math.v was regenerated at the pin —
-  the committed file carried a header hash from a different V build
-  (abcebfc, not dd6834e). Both builds self-report "V 0.5.2"; see §7.1a. If
-  `--check` goes stale after a compiler sync, regenerate and review the
-  diff before committing.
+  2026-10-27: the tool once shelled out to bare `v` — whichever build was
+  on PATH — for BOTH the `v ast` signatures and the header version stamp,
+  so "generated at the pin" depended on the operator's machine. Now both
+  calls use `@VEXE` (the compiler running the script), and `--check`
+  strips the header `at V ...` stamp, comparing content only. The
+  controls, if anyone edits `strip_stamp`: corrupting ONLY the header
+  stamp must still pass; corrupting a body line must fail. A stale check
+  after a compiler sync still means regenerate and review the diff.
 
 ## Gotchas that cost sessions
 
